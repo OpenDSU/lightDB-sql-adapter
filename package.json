@@ -1,0 +1,29 @@
+{
+  "name": "lightdb-sql-adapter",
+  "version": "1.0.0",
+  "description": "SQL Adapter for LightDB",
+  "main": "index.js",
+  "scripts": {
+    "test": "mocha tests/postgres-adapter-tests.js --timeout 10000"
+  },
+  "dependencies": {
+    "pg": "^8.11.3"
+  },
+  "devDependencies": {
+    "mocha": "^10.2.0",
+    "assert": "^2.1.0"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/your-username/lightdb-sql-adapter.git"
+  },
+  "keywords": [
+    "lightdb",
+    "postgresql",
+    "adapter",
+    "database",
+    "sql"
+  ],
+  "author": "",
+  "license": "MIT"
+}
