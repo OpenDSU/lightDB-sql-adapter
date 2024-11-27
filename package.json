@@ -1,13 +1,15 @@
 {
   "name": "lightdb-sql-adapter",
   "version": "1.0.0",
-  "description": "SQL Adapter for LightDB",
+  "description": "Universal SQL Adapter for LightDB",
   "main": "index.js",
   "scripts": {
-    "test": "mocha tests/postgres-adapter-tests.js --timeout 10000"
+    "test": "mocha tests/sql-adapter-tests.js --timeout 10000"
   },
   "dependencies": {
-    "pg": "^8.11.3"
+    "pg": "^8.11.3",
+    "mysql2": "^3.6.1",
+    "mssql": "^10.0.1"
   },
   "devDependencies": {
     "mocha": "^10.2.0",
@@ -20,6 +22,8 @@
   "keywords": [
     "lightdb",
     "postgresql",
+    "mysql",
+    "sqlserver",
     "adapter",
     "database",
     "sql"

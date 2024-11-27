@@ -1,92 +1,93 @@
-const {Pool} = require('pg');
+// sqlAdapter.js
 const crypto = require('crypto');
+const {StrategyFactory} = require('./strategyFactory');
+const ConnectionRegistry = require('./connectionRegistry');
 
-// class SQLAdapter (Type - connection registry for connectivity - to make in separate file) {
-class PostgreSQLDb {
-    constructor(connectionString, autoSaveInterval) {
-        this.pool = new Pool({ connectionString });
-        // this.connection = new connectionRegistry.Type;
-        // Verify if "query" or other commands are general used for db or specific.
+class SQLAdapter {
+    constructor(type, connection) {
+        this.type = type;
+        this.connection = connection;
+        this.strategy = StrategyFactory.createStrategy(type);
         this.logger = console;
-
-        // Constants
         this.READ_WRITE_KEY_TABLE = "KeyValueTable";
+        this.debug = process.env.DEBUG === 'true';
 
-        // Initialize schema immediately and store the promise
-        this.initPromise = this.initializeSchema().catch(err => {
-            this.logger.error('Failed to initialize PostgreSQL schema', err);
+        // Initialize connection and schema
+        this.initPromise = this.#initialize().catch(err => {
+            this.logger.error(`Failed to initialize schema:`, err);
             throw err;
         });
     }
 
-    async initializeSchema() {
-        const client = await this.pool.connect();
-        try {
-            await client.query('BEGIN');
-
-            // Create collections table
-            await client.query(`
-                CREATE TABLE IF NOT EXISTS collections (
-                    name VARCHAR(255) PRIMARY KEY,
-                    indices JSONB
-                );
-            `);
-
-            // Create key-value table
-            await client.query(`
-                CREATE TABLE IF NOT EXISTS "${this.READ_WRITE_KEY_TABLE}" (
-                    pk TEXT PRIMARY KEY,
-                    data JSONB,
-                    __timestamp BIGINT
-                );
-            `);
-
-            await client.query('COMMIT');
-        } catch (err) {
-            await client.query('ROLLBACK');
-            throw err;
-        } finally {
-            client.release();
-        }
+    async #initialize() {
+        await this.#initializeSchema();
+        return this;
     }
 
-    async ensureCollectionTable(tableName) {
-        const client = await this.pool.connect();
-        try {
-            await client.query(`
-                CREATE TABLE IF NOT EXISTS "${tableName}" (
-                    pk TEXT PRIMARY KEY,
-                    data JSONB,
-                    __timestamp BIGINT
-                );
-            `);
-        } finally {
-            client.release();
+    async #initializeSchema() {
+        const collectionsTable = this.strategy.createCollectionsTable();
+        const keyValueTable = this.strategy.createKeyValueTable(this.READ_WRITE_KEY_TABLE);
+
+        if (this.debug) {
+            this.logger.log('Collections Table Query:', collectionsTable);
+            this.logger.log('KeyValue Table Query:', keyValueTable);
         }
+
+        if (!collectionsTable || !collectionsTable.query) {
+            throw new Error('Invalid collections table creation query');
+        }
+        if (!keyValueTable || !keyValueTable.query) {
+            throw new Error('Invalid key-value table creation query');
+        }
+
+        await this.strategy.executeTransaction(this.connection, [
+            collectionsTable,
+            keyValueTable
+        ]);
     }
 
     async close() {
-        await this.pool.end();
+        if (this.connection) {
+            await this.strategy.closeConnection(this.connection);
+        }
     }
 
     refresh(callback) {
+        // No-op for SQL databases
         callback();
     }
 
+    refreshAsync() {
+        return Promise.resolve();
+    }
+
     saveDatabase(callback) {
+        // Auto-save is handled by SQL databases
         callback(undefined, {message: "Database saved"});
     }
 
-    count(tableName, callback) {
-        this.pool.query(`SELECT COUNT(*) FROM "${tableName}"`)
-            .then(result => callback(null, parseInt(result.rows[0].count)))
-            .catch(callback);
+    async count(tableName, callback) {
+        try {
+            const result = await this.strategy.executeQuery(
+                this.connection,
+                this.strategy.count(tableName)
+            );
+            callback(null, this.strategy.parseCountResult(result));
+        } catch (err) {
+            callback(err);
+        }
     }
 
-    getCollections(callback) {
-        this.pool.query('SELECT name FROM collections')
-            .then(result => callback(undefined, result.rows.map(row => row.name)))
-            .catch(callback);
+    async getCollections(callback) {
+        try {
+            const result = await this.strategy.executeQuery(
+                this.connection,
+                this.strategy.getCollections()
+            );
+            callback(null, this.strategy.parseCollectionsResult(result));
+        } catch (err) {
+            callback(err);
+        }
     }
 
     async createCollection(tableName, indicesList, callback) {
@@ -95,115 +96,126 @@ class PostgreSQLDb {
             indicesList = undefined;
         }
 
-        const client = await this.pool.connect();
         try {
-            await client.query('BEGIN');
-            await this.ensureCollectionTable(tableName);
-
-            await client.query(
-                'INSERT INTO collections (name, indices) VALUES ($1, $2) ON CONFLICT (name) DO UPDATE SET indices = $2',
-                [tableName, JSON.stringify(indicesList || [])]
-            );
-
-            if (indicesList && Array.isArray(indicesList)) {
-                for (const index of indicesList) {
-                    await client.query(`
-                        CREATE INDEX IF NOT EXISTS "${tableName}_${index}"
-                        ON "${tableName}" ((data ->>'${index}'));
-                    `);
-                }
-            }
-
-            await client.query('COMMIT');
+            const queries = this.strategy.createCollection(tableName, indicesList);
+            await this.strategy.executeTransaction(this.connection, queries);
             callback(undefined, {message: `Collection ${tableName} created`});
         } catch (err) {
-            await client.query('ROLLBACK');
-            callback(err);
-        } finally {
-            client.release();
+            const error = err instanceof Error ? err : new Error(err.message || 'Unknown error');
+            callback(error);
         }
     }
 
-    removeCollection(collectionName, callback) {
-        this.pool.query(`DROP TABLE IF EXISTS "${collectionName}";`)
-            .then(() => this.pool.query('DELETE FROM collections WHERE name = $1', [collectionName]))
-            .then(() => callback())
-            .catch(callback);
+    async removeCollection(tableName, callback) {
+        try {
+            await this.strategy.executeTransaction(
+                this.connection,
+                this.strategy.removeCollection(tableName)
+            );
+            callback();
+        } catch (err) {
+            callback(err);
+        }
     }
 
-    insertRecord(tableName, pk, record, callback) {
-        this.ensureCollectionTable(tableName)
-            .then(() => this.pool.query(
-                `SELECT pk FROM "${tableName}" WHERE pk = $1`,
+    async removeCollectionAsync(tableName) {
+        return await this.strategy.removeCollectionAsync(this.connection, tableName);
+    }
+
+    async addIndex(tableName, property, callback) {
+        try {
+            await this.strategy.executeQuery(
+                this.connection,
+                this.strategy.addIndex(tableName, property)
+            );
+            callback();
+        } catch (err) {
+            callback(err);
+        }
+    }
+
+    async getOneRecord(tableName, callback) {
+        try {
+            const result = await this.strategy.executeQuery(
+                this.connection,
+                this.strategy.getOneRecord(tableName)
+            );
+            callback(null, this.strategy.parseGetResult(result));
+        } catch (err) {
+            callback(err);
+        }
+    }
+
+    async getAllRecords(tableName, callback) {
+        try {
+            const result = await this.strategy.executeQuery(
+                this.connection,
+                this.strategy.getAllRecords(tableName)
+            );
+            callback(null, this.strategy.parseFilterResults(result));
+        } catch (err) {
+            callback(err);
+        }
+    }
+
+    async insertRecord(tableName, pk, record, callback) {
+        try {
+            const timestamp = Date.now();
+            const query = this.strategy.insertRecord(tableName);
+            const result = await this.strategy.executeQuery(
+                this.connection,
+                query,
+                [pk, JSON.stringify(record), timestamp]  // Pass the parameters here
+            );
+            callback(null, this.strategy.parseInsertResult(result, pk, record));
+        } catch (err) {
+            callback(err);
+        }
+    }
+
+    async updateRecord(tableName, pk, record, callback) {
+        try {
+            const timestamp = Date.now();
+            const query = this.strategy.updateRecord(tableName);
+            const result = await this.strategy.executeQuery(
+                this.connection,
+                query,
+                [pk, JSON.stringify(record), timestamp]
+            );
+            callback(null, this.strategy.parseUpdateResult(result));
+        } catch (err) {
+            callback(err);
+        }
+    }
+
+    async deleteRecord(tableName, pk, callback) {
+        try {
+            const query = this.strategy.deleteRecord(tableName);
+            const result = await this.strategy.executeQuery(
+                this.connection,
+                query,
                 [pk]
-            ))
-            .then(exists => {
-                if (exists.rows.length > 0) {
-                    throw new Error(`A record with pk ${pk} already exists in ${tableName}`);
-                }
-
-                const timestamp = Date.now();
-                return this.pool.query(
-                    `INSERT INTO "${tableName}" (pk, data, __timestamp) VALUES ($1, $2, $3) RETURNING *`,
-                    [pk, record, timestamp]
-                );
-            })
-            .then(result => callback(null, {...result.rows[0].data, pk}))
-            .catch(callback);
+            );
+            callback(null, this.strategy.parseDeleteResult(result));
+        } catch (err) {
+            callback(err);
+        }
     }
 
-    updateRecord(tableName, pk, record, callback) {
-        const timestamp = Date.now();
-        this.pool.query(
-            `UPDATE "${tableName}"
-             SET data = $1,
-                 __timestamp = $2
-             WHERE pk = $3 RETURNING *`,
-            [record, timestamp, pk]
-        )
-            .then(result => {
-                if (result.rows.length === 0 && record.__fallbackToInsert) {
-                    delete record.__fallbackToInsert;
-                    return this.insertRecord(tableName, pk, record, callback);
-                }
-                callback(null, {...record, pk, __timestamp: timestamp});
-            })
-            .catch(callback);
+    async getRecord(tableName, pk, callback) {
+        try {
+            const result = await this.strategy.executeQuery(
+                this.connection,
+                this.strategy.getRecord(tableName),
+                {pk}
+            );
+            callback(null, this.strategy.parseGetResult(result, pk));
+        } catch (err) {
+            callback(err);
+        }
     }
 
-    deleteRecord(tableName, pk, callback) {
-        this.pool.query(
-            `DELETE FROM "${tableName}" WHERE pk = $1 RETURNING *`,
-            [pk]
-        )
-            .then(result => {
-                if (result.rows.length === 0) {
-                    return callback(undefined, {pk});
-                }
-                callback(null, {...result.rows[0].data, pk});
-            })
-            .catch(callback);
-    }
-
-    getRecord(tableName, pk, callback) {
-        this.pool.query(
-            `SELECT data, __timestamp FROM "${tableName}" WHERE pk = $1`,
-            [pk]
-        )
-            .then(result => {
-                if (result.rows.length === 0) {
-                    return callback(null, null);
-                }
-                callback(null, {
-                    ...result.rows[0].data,
-                    pk,
-                    __timestamp: result.rows[0].__timestamp
-                });
-            })
-            .catch(callback);
-    }
-
-    filter(tableName, filterConditions, sort, max, callback) {
+    async filter(tableName, filterConditions, sort, max, callback) {
         if (typeof filterConditions === "function") {
             callback = filterConditions;
             filterConditions = undefined;
@@ -211,72 +223,46 @@ class PostgreSQLDb {
             max = Infinity;
         }
 
-        let query = `SELECT pk, data, __timestamp FROM "${tableName}"`;
-        const params = [];
-        let paramIndex = 1;
+        try {
+            let conditions = '';
+            let sortConfig = {
+                field: '__timestamp',
+                direction: (sort === 'desc' ? 'DESC' : 'ASC')
+            };
 
-        if (filterConditions && filterConditions.length) {
-            const conditions = Array.isArray(filterConditions) ? filterConditions : [filterConditions];
-            query += ' WHERE ' + conditions.map(condition => {
-                const [field, operator, value] = condition.split(/\s+/);
-                params.push(value.replace(/['"]/g, ''));
-                return `(data->>'${field}')::numeric ${operator} $${paramIndex++}`;
-            }).join(' AND ');
+            if (filterConditions && filterConditions.length) {
+                conditions = this.strategy.convertConditionsToLokiQuery(filterConditions);
+            }
+
+            const result = await this.strategy.executeQuery(
+                this.connection,
+                this.strategy.filter(tableName, conditions, sortConfig, max)
+            );
+
+            callback(null, this.strategy.parseFilterResults(result));
+        } catch (err) {
+            callback(err);
         }
-
-        // Fix the ORDER BY clause to use the JSONB field
-        const sortField = filterConditions?.[0]?.split(' ')?.[0] || '__timestamp';
-        if (sortField === '__timestamp') {
-            query += ` ORDER BY __timestamp ${sort === 'desc' ? 'DESC' : 'ASC'}`;
-        } else {
-            query += ` ORDER BY (data->>'${sortField}')::numeric ${sort === 'desc' ? 'DESC' : 'ASC'}`;
-        }
-
-        if (max && max !== Infinity) {
-            query += ` LIMIT ${max}`;
-        }
-
-        this.pool.query(query, params)
-            .then(result => {
-                const records = result.rows.map(row => ({
-                    ...row.data,
-                    pk: row.pk,
-                    __timestamp: row.__timestamp
-                }));
-                callback(null, records);
-            })
-            .catch(callback);
-    }
-
-    getAllRecords(tableName, callback) {
-        this.pool.query(`SELECT pk, data, __timestamp FROM "${tableName}"`)
-            .then(result => {
-                const records = result.rows.map(row => ({
-                    ...row.data,
-                    pk: row.pk,
-                    __timestamp: row.__timestamp
-                }));
-                callback(null, records);
-            })
-            .catch(callback);
     }
 
     // Queue operations
-    addInQueue(queueName, object, ensureUniqueness, callback) {
+    async addInQueue(queueName, object, ensureUniqueness, callback) {
         if (typeof ensureUniqueness === "function") {
             callback = ensureUniqueness;
             ensureUniqueness = false;
         }
 
-        const hash = crypto.createHash('sha256').update(JSON.stringify(object)).digest('hex');
-        let pk = hash;
-
-        if (ensureUniqueness) {
-            const random = crypto.randomBytes(5).toString('base64');
-            pk = `${hash}_${Date.now()}_${random}`;
+        try {
+            const pk = await this.strategy.addInQueue(
+                this.connection,
+                queueName,
+                object,
+                ensureUniqueness
+            );
+            callback(null, pk);
+        } catch (err) {
+            callback(err);
         }
-
-        this.insertRecord(queueName, pk, object, (err) => callback(err, pk));
     }
 
     queueSize(queueName, callback) {
@@ -290,37 +276,50 @@ class PostgreSQLDb {
             onlyFirstN = undefined;
         }
 
-        let query = `SELECT pk FROM "${queueName}" ORDER BY __timestamp ${
-            sortAfterInsertTime === "desc" ? "DESC" : "ASC"
-        }`;
-
-        if (onlyFirstN) {
-            query += ` LIMIT ${onlyFirstN}`;
-        }
-
-        this.pool.query(query)
-            .then(result => callback(null, result.rows.map(row => row.pk)))
-            .catch(err => {
-                if (err.code === '42P01') { // table does not exist
+        this.filter(queueName, [], sortAfterInsertTime, onlyFirstN, (err, results) => {
+            if (err) {
+                if (this.strategy.isTableNotExistsError?.(err)) {
                     callback(undefined, []);
                     return;
                 }
                 callback(err);
-            });
+                return;
+            }
+            callback(null, results.map(r => r.pk));
+        });
     }
 
-    getObjectFromQueue(queueName, hash, callback) {
-        return this.getRecord(queueName, hash, callback);
+    async getObjectFromQueue(queueName, hash, callback) {
+        try {
+            const query = this.strategy.getObjectFromQueue(queueName, hash);
+            const result = await this.strategy.executeQuery(
+                this.connection,
+                query,
+                [hash]
+            );
+            callback(null, this.strategy.parseGetResult(result));
+        } catch (err) {
+            callback(err);
+        }
     }
 
-    deleteObjectFromQueue(queueName, hash, callback) {
-        return this.deleteRecord(queueName, hash, callback);
+    async deleteObjectFromQueue(queueName, hash, callback) {
+        try {
+            const query = this.strategy.deleteObjectFromQueue(queueName, hash);
+            const result = await this.strategy.executeQuery(
+                this.connection,
+                query,
+                [hash]
+            );
+            callback(null, this.strategy.parseDeleteResult(result));
+        } catch (err) {
+            callback(err);
+        }
     }
 
-    // Key-Value operations
+    // Key-value operations
     async writeKey(key, value, callback) {
         try {
-            // Wait for initialization to complete
             await this.initPromise;
 
             let valueObject = {
@@ -340,18 +339,14 @@ class PostgreSQLDb {
                 };
             }
 
-            // Update if exists, insert if not
             const timestamp = Date.now();
-            const result = await this.pool.query(
-                `INSERT INTO "${this.READ_WRITE_KEY_TABLE}" (pk, data, __timestamp)
-                VALUES ($1, $2, $3)
-                ON CONFLICT (pk) DO UPDATE 
-                SET data = $2, __timestamp = $3
-                RETURNING data`,
-                [key, valueObject, timestamp]
+            const query = this.strategy.writeKey(this.READ_WRITE_KEY_TABLE);
+            const result = await this.strategy.executeQuery(
+                this.connection,
+                query,
+                [key, JSON.stringify(valueObject), timestamp]
             );
-
-            callback(null, result.rows[0].data);
+            callback(null, valueObject);
         } catch (err) {
             callback(err);
         }
@@ -359,24 +354,25 @@ class PostgreSQLDb {
 
     async readKey(key, callback) {
         try {
-            // Wait for initialization to complete
             await this.initPromise;
-
-            const result = await this.pool.query(
-                `SELECT data FROM "${this.READ_WRITE_KEY_TABLE}" WHERE pk = $1`,
+            const query = this.strategy.readKey(this.READ_WRITE_KEY_TABLE);
+            const result = await this.strategy.executeQuery(
+                this.connection,
+                query,
                 [key]
             );
 
-            if (result.rows.length === 0) {
+            const parsedResult = this.strategy.parseReadKeyResult(result);
+            if (!parsedResult) {
                 callback(null, null);
                 return;
             }
 
-            callback(null, result.rows[0].data);
+            callback(null, typeof parsedResult === 'string' ? JSON.parse(parsedResult) : parsedResult);
         } catch (err) {
             callback(err);
         }
     }
 }
 
-module.exports = PostgreSQLDb;
+module.exports = SQLAdapter;
