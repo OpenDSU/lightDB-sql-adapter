@@ -8,6 +8,17 @@ class PostgreSQLStrategy extends BaseStrategy {
         this._storageDB = null;
     }
 
+    async ensureCollectionsTable(connection) {
+        const createTableQuery = `
+        CREATE TABLE IF NOT EXISTS collections (
+            name VARCHAR(255) PRIMARY KEY,
+            indices JSONB
+        );
+    `;
+
+        await this.executeQuery(connection, createTableQuery);
+    }
+
     // Database schema operations
     createCollectionsTable() {
         return {
@@ -35,27 +46,32 @@ class PostgreSQLStrategy extends BaseStrategy {
     }
 
     createCollection(tableName, indicesList) {
-        try {
-            // Validate table name
-            if (!/^[a-zA-Z0-9_]+$/.test(tableName)) {
-                throw new Error(`Invalid table name: ${tableName}`);
-            }
-
-            return [
-                {
-                    query: this.createKeyValueTable(tableName).query,
-                    params: []
-                },
-                {
-                    query: 'INSERT INTO collections (name, indices) VALUES ($1, $2) ON CONFLICT (name) DO UPDATE SET indices = $2',
-                    params: [tableName, JSON.stringify(indicesList || [])]
-                }
-            ];
-        } catch (err) {
-            const error = new Error(err.message);
-            error.originalError = err;
-            throw error;
+        if (!/^[a-zA-Z0-9_]+$/.test(tableName)) {
+            throw new Error(`Invalid table name: ${tableName}`);
         }
+
+        const createTableQuery = `
+        CREATE TABLE IF NOT EXISTS "${tableName}" (
+            pk TEXT PRIMARY KEY,
+            data JSONB,
+            __timestamp BIGINT
+        )
+    `;
+
+        const insertQuery = `
+        INSERT INTO collections (name, indices)
+        VALUES ($1, $2)
+        ON CONFLICT (name) DO UPDATE
+        SET indices = $2
+    `;
+
+        return [
+            {query: createTableQuery},
+            {
+                query: insertQuery,
+                params: [tableName, JSON.stringify(indicesList || [])]
+            }
+        ];
     }
 
     createIndex(tableName, index) {
@@ -85,10 +101,7 @@ class PostgreSQLStrategy extends BaseStrategy {
 
     // Collection information
     getCollections() {
-        return {
-            query: 'SELECT name FROM collections',
-            params: []
-        };
+        return {query: 'SELECT name FROM collections'};
     }
 
     listCollections() {
@@ -133,9 +146,8 @@ class PostgreSQLStrategy extends BaseStrategy {
             query: `
             INSERT INTO "${tableName}" (pk, data, __timestamp)
             VALUES ($1, $2::jsonb, $3)
-            RETURNING *
-        `,
-            params: []
+            RETURNING pk, data, __timestamp
+        `
         };
     }
 
@@ -144,44 +156,55 @@ class PostgreSQLStrategy extends BaseStrategy {
             query: `
                 UPDATE "${tableName}"
                 SET data = $2::jsonb,
-                    __timestamp = $3
+                __timestamp = $3
                 WHERE pk = $1
-                    RETURNING *
-            `,
-            params: []
+                    RETURNING pk
+                    , data
+                    , __timestamp
+            `
         };
     }
 
     deleteRecord(tableName) {
         return {
             query: `
-                DELETE FROM "${tableName}" 
-                WHERE pk = $1 
-                RETURNING *
-            `,
-            params: []
+            DELETE FROM "${tableName}"
+            WHERE pk = $1
+            RETURNING pk, data, __timestamp
+        `
         };
     }
 
     getRecord(tableName) {
-        return `SELECT data, __timestamp FROM "${tableName}" WHERE pk = $1`;
+        return {
+            query: `SELECT data, __timestamp FROM "${tableName}" WHERE pk = $1`
+        };
     }
 
     getOneRecord(tableName) {
-        return `SELECT data, __timestamp FROM "${tableName}" LIMIT 1`;
+        return {
+            query: `SELECT data, __timestamp FROM "${tableName}" LIMIT 1`
+        };
     }
 
     getAllRecords(tableName) {
-        return `SELECT pk, data, __timestamp FROM "${tableName}"`;
+        return {
+            query: `SELECT pk, data, __timestamp FROM "${tableName}"`
+        };
     }
 
     filter(tableName, conditions, sort, max) {
-        return `
-            SELECT pk, data, __timestamp FROM "${tableName}"
+        const orderField = sort?.field || '__timestamp';
+        const orderDirection = sort?.direction || 'ASC';
+        return {
+            query: `
+            SELECT pk, data, __timestamp
+            FROM "${tableName}"
             ${conditions ? `WHERE ${conditions}` : ''}
-            ORDER BY ${sort.field} ${sort.direction}
+            ORDER BY "${orderField}" ${orderDirection}
             ${max ? `LIMIT ${max}` : ''}
-        `;
+        `
+        };
     }
 
     convertConditionsToLokiQuery(conditions) {
@@ -206,7 +229,7 @@ class PostgreSQLStrategy extends BaseStrategy {
     }
 
     formatFilterCondition(field, operator, value) {
-        return `(data->>'${field}')::numeric ${operator} ${value.replace(/['"]/g, '')}`;
+        return `(data->>'${field}')::numeric ${operator} ${value}`;
     }
 
     // Queue operations
@@ -247,21 +270,19 @@ class PostgreSQLStrategy extends BaseStrategy {
     writeKey(tableName) {
         return {
             query: `
-                INSERT INTO "${tableName}" (pk, data, __timestamp)
-                VALUES ($1, $2::jsonb, $3)
-                ON CONFLICT (pk) DO UPDATE 
-                SET data = $2::jsonb, 
-                    __timestamp = $3
-                RETURNING *
-            `,
-            params: []
+            INSERT INTO "${tableName}" (pk, data, __timestamp)
+            VALUES ($1, $2::jsonb, $3)
+            ON CONFLICT (pk) DO UPDATE 
+            SET data = $2::jsonb, 
+                __timestamp = $3
+            RETURNING data
+        `
         };
     }
 
-    readKey(tableName) {
+    readKey(tableName, key) {
         return {
-            query: `SELECT data, __timestamp FROM "${tableName}" WHERE pk = $1`,
-            params: []
+            query: `SELECT data, __timestamp FROM "${tableName}" WHERE pk = $1`
         };
     }
 
@@ -297,16 +318,23 @@ class PostgreSQLStrategy extends BaseStrategy {
     }
 
     parseCollectionsResult(result) {
+        if (!result || !result.rows) return [];
         return result.rows.map(row => row.name);
     }
 
-    parseInsertResult(result, pk, record) {
-        if (!result.rows || result.rows.length === 0) return null;
-        return {
-            ...record,
-            pk,
-            __timestamp: result.rows[0].__timestamp
-        };
+    parseInsertResult(result) {
+        if (!result?.rows?.[0]) return null;
+        const row = result.rows[0];
+        try {
+            return {
+                ...JSON.parse(row.data),
+                pk: row.pk,
+                __timestamp: row.__timestamp
+            };
+        } catch (e) {
+            console.error('Error parsing insert result:', e);
+            return null;
+        }
     }
 
     parseUpdateResult(result) {
@@ -336,30 +364,30 @@ class PostgreSQLStrategy extends BaseStrategy {
     }
 
     parseGetResult(result) {
-        if (!result || !result.rows || !result.rows.length) {
-            return null;
-        }
-        const row = result.rows[0];
+        if (!result?.rows?.[0]) return null;
         try {
-            return row.data || null;
+            if (typeof result.rows[0].data === 'string') {
+                return JSON.parse(result.rows[0].data);
+            }
+            return result.rows[0].data;
         } catch (e) {
-            console.error('Error parsing JSON:', e);
+            console.error('Error parsing get result:', e);
             return null;
         }
     }
 
     parseFilterResults(result) {
-        if (!result || !result.rows) return [];
+        if (!result?.rows) return [];
         return result.rows.map(row => {
             try {
                 const data = typeof row.data === 'string' ? JSON.parse(row.data) : row.data;
                 return {
-                    pk: row.pk,
                     ...data,
+                    pk: row.pk,
                     __timestamp: row.__timestamp
                 };
             } catch (e) {
-                console.error('Error parsing row data:', e, row);
+                console.error('Error parsing filter row:', e);
                 return null;
             }
         }).filter(Boolean);
@@ -367,10 +395,13 @@ class PostgreSQLStrategy extends BaseStrategy {
 
 
     parseWriteKeyResult(result) {
-        if (!result || !result.rows || !result.rows.length) return null;
+        if (!result?.rows?.[0]) return null;
         try {
-            const data = result.rows[0].data;
-            return typeof data === 'string' ? JSON.parse(data) : data;
+            if (!result.rows[0].data) return null;
+            const data = typeof result.rows[0].data === 'string'
+                ? JSON.parse(result.rows[0].data)
+                : result.rows[0].data;
+            return data;
         } catch (e) {
             console.error('Error parsing write key result:', e);
             return null;
@@ -378,46 +409,54 @@ class PostgreSQLStrategy extends BaseStrategy {
     }
 
     parseReadKeyResult(result) {
-        if (!result || !result.rows || !result.rows.length) return null;
+        if (!result?.rows?.[0]) return null;
         try {
-            const data = result.rows[0].data;
-            return typeof data === 'string' ? JSON.parse(data) : data;
+            if (!result.rows[0].data) return null;
+            const data = typeof result.rows[0].data === 'string'
+                ? JSON.parse(result.rows[0].data)
+                : result.rows[0].data;
+            return data;
         } catch (e) {
             console.error('Error parsing read key result:', e);
             return null;
         }
     }
 
+    parseQueueResult(result) {
+        if (!result || !result.rows || !result.rows.length === 0) return null;
+        const row = result.rows[0];
+        return JSON.parse(row.data);
+    }
+
     // Transaction handling
-    async executeQuery(connection, queryObject, params = []) {
+    async executeQuery(connection, query, params = []) {
         const client = await connection.connect();
         try {
-            let query, queryParams;
+            let queryString, queryParams;
 
-            if (typeof queryObject === 'string') {
-                query = queryObject;
-                queryParams = Array.isArray(params) ? params : [params];
-            } else if (queryObject && typeof queryObject === 'object') {
-                query = queryObject.query;
-                queryParams = [...(queryObject.params || []), ...(Array.isArray(params) ? params : [params])].filter(p => p !== undefined);
+            if (typeof query === 'string') {
+                queryString = query;
+                queryParams = Array.isArray(params) ? params : [];
+            } else if (query && typeof query === 'object') {
+                queryString = query.query;
+                queryParams = Array.isArray(params) ? params : [];
+                if (query.params) {
+                    queryParams = [...query.params];
+                }
             } else {
                 throw new Error('Invalid query object');
             }
 
-            if (!query) {
+            if (!queryString) {
                 throw new Error('Query string is required');
             }
 
-            if (process.env.DEBUG === 'true') {
-                console.log('Executing query:', {
-                    query: query,
-                    params: queryParams,
-                    numParams: (query.match(/\$\d+/g) || []).length,
-                    providedParams: queryParams.length
-                });
-            }
-
-            return await client.query(query, queryParams);
+            const result = await client.query(queryString, queryParams);
+            return {
+                rows: result.rows,
+                rowCount: result.rowCount,
+                command: result.command
+            };
         } finally {
             client.release();
         }
@@ -430,19 +469,15 @@ class PostgreSQLStrategy extends BaseStrategy {
             const results = [];
 
             for (const queryData of queries) {
-                try {
-                    const result = await client.query(
-                        queryData.query,
-                        (queryData.params || []).filter(p => p !== undefined)
-                    );
-                    results.push(result);
-                } catch (err) {
-                    // Properly format and throw error
-                    const error = new Error(err.message);
-                    error.code = err.code;
-                    error.detail = err.detail;
-                    throw error;
-                }
+                const query = typeof queryData === 'string' ? queryData : queryData.query;
+                const params = queryData.params || [];
+
+                const result = await client.query(query, params);
+                results.push({
+                    rows: result.rows,
+                    rowCount: result.rowCount,
+                    command: result.command
+                });
             }
 
             await client.query('COMMIT');

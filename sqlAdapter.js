@@ -1,377 +1,282 @@
 // sqlAdapter.js
 const crypto = require('crypto');
-const {StrategyFactory} = require('./strategyFactory');
-const ConnectionRegistry = require('./connectionRegistry');
+const SQLWorkerAdapter = require('./sqlWorkerAdapter');
 
 class SQLAdapter {
-    constructor(type, connection) {
+    constructor(type) {
         this.type = type;
-        this.connection = connection;
-        this.strategy = StrategyFactory.createStrategy(type);
-        this.logger = console;
+        this.workerAdapter = new SQLWorkerAdapter(type);
         this.READ_WRITE_KEY_TABLE = "KeyValueTable";
         this.debug = process.env.DEBUG === 'true';
 
-        // Initialize connection and schema
-        this.initPromise = this.#initialize().catch(err => {
-            this.logger.error(`Failed to initialize schema:`, err);
-            throw err;
+        // Forward worker events
+        this.workerAdapter.on('error', error => console.error('Worker error:', error));
+        this.workerAdapter.on('exit', code => {
+            if (code !== 0) {
+                console.error(`Worker stopped with exit code ${code}`);
+            }
         });
-    }
-
-    async #initialize() {
-        await this.#initializeSchema();
-        return this;
-    }
-
-    async #initializeSchema() {
-        const collectionsTable = this.strategy.createCollectionsTable();
-        const keyValueTable = this.strategy.createKeyValueTable(this.READ_WRITE_KEY_TABLE);
-
-        if (this.debug) {
-            this.logger.log('Collections Table Query:', collectionsTable);
-            this.logger.log('KeyValue Table Query:', keyValueTable);
-        }
-
-        if (!collectionsTable || !collectionsTable.query) {
-            throw new Error('Invalid collections table creation query');
-        }
-        if (!keyValueTable || !keyValueTable.query) {
-            throw new Error('Invalid key-value table creation query');
-        }
-
-        await this.strategy.executeTransaction(this.connection, [
-            collectionsTable,
-            keyValueTable
-        ]);
     }
 
     async close() {
-        if (this.connection) {
-            await this.strategy.closeConnection(this.connection);
-        }
+        await this.workerAdapter.close();
     }
 
     refresh(callback) {
-        // No-op for SQL databases
-        callback();
+        // Even though this is a no-op, we'll still run it through the worker
+        // to maintain consistency with the worker pattern
+        this.workerAdapter.executeWorkerTask('refresh', [])
+            .then(() => callback())
+            .catch(error => callback(error));
     }
 
-    refreshAsync() {
-        return Promise.resolve();
+    async refreshAsync() {
+        return this.workerAdapter.executeWorkerTask('refresh', []);
     }
 
     saveDatabase(callback) {
-        // Auto-save is handled by SQL databases
-        callback(undefined, {message: "Database saved"});
+        this.workerAdapter.executeWorkerTask('saveDatabase', [])
+            .then(result => callback(undefined, {message: "Database saved"}))
+            .catch(error => callback(error));
     }
 
-    async count(tableName, callback) {
+    async saveDatabaseAsync() {
+        await this.workerAdapter.executeWorkerTask('saveDatabase', []);
+        return {message: "Database saved"};
+    }
+
+    async count(tableName) {
+        const result = await this.workerAdapter.executeWorkerTask(
+            'executeQuery',
+            ['count', [tableName]]
+        );
+        return this.workerAdapter.executeWorkerTask(
+            'parseResult',
+            ['parseCountResult', result]
+        );
+    }
+
+    async getCollections() {
+        const result = await this.workerAdapter.executeWorkerTask(
+            'executeQuery',
+            ['getCollections', []]
+        );
+        return this.workerAdapter.executeWorkerTask(
+            'parseResult',
+            ['parseCollectionsResult', result]
+        );
+    }
+
+    async createCollection(tableName, indicesList) {
         try {
-            const result = await this.strategy.executeQuery(
-                this.connection,
-                this.strategy.count(tableName)
+            const result = await this.workerAdapter.executeWorkerTask(
+                'executeQuery',
+                ['createCollection', [tableName, indicesList]]
             );
-            callback(null, this.strategy.parseCountResult(result));
-        } catch (err) {
-            callback(err);
+            return {message: `Collection ${tableName} created`};
+        } catch (error) {
+            // Convert complex error to simple string
+            const errorMessage = error.message || 'Unknown error occurred';
+            throw new Error(`Failed to create collection: ${errorMessage}`);
         }
     }
 
-    async getCollections(callback) {
-        try {
-            const result = await this.strategy.executeQuery(
-                this.connection,
-                this.strategy.getCollections()
-            );
-            callback(null, this.strategy.parseCollectionsResult(result));
-        } catch (err) {
-            callback(err);
-        }
-    }
-
-    async createCollection(tableName, indicesList, callback) {
-        if (typeof indicesList === "function") {
-            callback = indicesList;
-            indicesList = undefined;
-        }
-
-        try {
-            const queries = this.strategy.createCollection(tableName, indicesList);
-            await this.strategy.executeTransaction(this.connection, queries);
-            callback(undefined, {message: `Collection ${tableName} created`});
-        } catch (err) {
-            const error = err instanceof Error ? err : new Error(err.message || 'Unknown error');
-            callback(error);
-        }
-    }
-
-    async removeCollection(tableName, callback) {
-        try {
-            await this.strategy.executeTransaction(
-                this.connection,
-                this.strategy.removeCollection(tableName)
-            );
-            callback();
-        } catch (err) {
-            callback(err);
-        }
+    async removeCollection(tableName) {
+        return this.workerAdapter.executeWorkerTask(
+            'executeTransaction',
+            ['removeCollection', [tableName]]
+        );
     }
 
     async removeCollectionAsync(tableName) {
-        return await this.strategy.removeCollectionAsync(this.connection, tableName);
+        return this.workerAdapter.executeWorkerTask(
+            'executeQuery',
+            ['removeCollectionAsync', [tableName]]
+        );
     }
 
-    async addIndex(tableName, property, callback) {
-        try {
-            await this.strategy.executeQuery(
-                this.connection,
-                this.strategy.addIndex(tableName, property)
-            );
-            callback();
-        } catch (err) {
-            callback(err);
-        }
+    async addIndex(tableName, property) {
+        return this.workerAdapter.executeWorkerTask(
+            'executeQuery',
+            ['addIndex', [tableName, property]]
+        );
     }
 
-    async getOneRecord(tableName, callback) {
-        try {
-            const result = await this.strategy.executeQuery(
-                this.connection,
-                this.strategy.getOneRecord(tableName)
-            );
-            callback(null, this.strategy.parseGetResult(result));
-        } catch (err) {
-            callback(err);
-        }
+    async getOneRecord(tableName) {
+        const result = await this.workerAdapter.executeWorkerTask(
+            'executeQuery',
+            ['getOneRecord', [tableName]]
+        );
+        return this.workerAdapter.executeWorkerTask(
+            'parseResult',
+            ['parseGetResult', result]
+        );
     }
 
-    async getAllRecords(tableName, callback) {
-        try {
-            const result = await this.strategy.executeQuery(
-                this.connection,
-                this.strategy.getAllRecords(tableName)
-            );
-            callback(null, this.strategy.parseFilterResults(result));
-        } catch (err) {
-            callback(err);
-        }
+    async getAllRecords(tableName) {
+        const result = await this.workerAdapter.executeWorkerTask(
+            'executeQuery',
+            ['getAllRecords', [tableName]]
+        );
+        return this.workerAdapter.executeWorkerTask(
+            'parseResult',
+            ['parseFilterResults', result]
+        );
     }
 
-    async insertRecord(tableName, pk, record, callback) {
-        try {
-            const timestamp = Date.now();
-            const query = this.strategy.insertRecord(tableName);
-            const result = await this.strategy.executeQuery(
-                this.connection,
-                query,
-                [pk, JSON.stringify(record), timestamp]  // Pass the parameters here
-            );
-            callback(null, this.strategy.parseInsertResult(result, pk, record));
-        } catch (err) {
-            callback(err);
-        }
+    async insertRecord(tableName, pk, record) {
+        const timestamp = Date.now();
+        const result = await this.workerAdapter.executeWorkerTask(
+            'executeQuery',
+            ['insertRecord', [tableName, pk, JSON.stringify(record), timestamp]]
+        );
+        return this.workerAdapter.executeWorkerTask(
+            'parseResult',
+            ['parseInsertResult', [result, pk, record]]
+        );
     }
 
-    async updateRecord(tableName, pk, record, callback) {
-        try {
-            const timestamp = Date.now();
-            const query = this.strategy.updateRecord(tableName);
-            const result = await this.strategy.executeQuery(
-                this.connection,
-                query,
-                [pk, JSON.stringify(record), timestamp]
-            );
-            callback(null, this.strategy.parseUpdateResult(result));
-        } catch (err) {
-            callback(err);
-        }
+    async updateRecord(tableName, pk, record) {
+        const timestamp = Date.now();
+        const result = await this.workerAdapter.executeWorkerTask(
+            'executeQuery',
+            ['updateRecord', [tableName, pk, JSON.stringify(record), timestamp]]
+        );
+        return this.workerAdapter.executeWorkerTask(
+            'parseResult',
+            ['parseUpdateResult', result]
+        );
     }
 
-    async deleteRecord(tableName, pk, callback) {
-        try {
-            const query = this.strategy.deleteRecord(tableName);
-            const result = await this.strategy.executeQuery(
-                this.connection,
-                query,
-                [pk]
-            );
-            callback(null, this.strategy.parseDeleteResult(result));
-        } catch (err) {
-            callback(err);
-        }
+    async deleteRecord(tableName, pk) {
+        const result = await this.workerAdapter.executeWorkerTask(
+            'executeQuery',
+            ['deleteRecord', [tableName, pk]]
+        );
+        return this.workerAdapter.executeWorkerTask(
+            'parseResult',
+            ['parseDeleteResult', [result, pk]]
+        );
     }
 
-    async getRecord(tableName, pk, callback) {
-        try {
-            const result = await this.strategy.executeQuery(
-                this.connection,
-                this.strategy.getRecord(tableName),
-                {pk}
-            );
-            callback(null, this.strategy.parseGetResult(result, pk));
-        } catch (err) {
-            callback(err);
-        }
+    async getRecord(tableName, pk) {
+        const result = await this.workerAdapter.executeWorkerTask(
+            'executeQuery',
+            ['getRecord', [tableName, pk]]
+        );
+        return this.workerAdapter.executeWorkerTask(
+            'parseResult',
+            ['parseGetResult', result]
+        );
     }
 
-    async filter(tableName, filterConditions, sort, max, callback) {
-        if (typeof filterConditions === "function") {
-            callback = filterConditions;
-            filterConditions = undefined;
-            sort = "asc";
-            max = Infinity;
-        }
+    async filter(tableName, filterConditions = [], sort = 'asc', max = null) {
+        let conditions = '';
+        let sortConfig = {
+            field: '__timestamp',
+            direction: (sort === 'desc' ? 'DESC' : 'ASC')
+        };
 
-        try {
-            let conditions = '';
-            let sortConfig = {
-                field: '__timestamp',
-                direction: (sort === 'desc' ? 'DESC' : 'ASC')
-            };
-
-            if (filterConditions && filterConditions.length) {
-                conditions = this.strategy.convertConditionsToLokiQuery(filterConditions);
-            }
-
-            const result = await this.strategy.executeQuery(
-                this.connection,
-                this.strategy.filter(tableName, conditions, sortConfig, max)
+        if (filterConditions && filterConditions.length) {
+            const result = await this.workerAdapter.executeWorkerTask(
+                'executeQuery',
+                ['convertConditionsToLokiQuery', [filterConditions]]
             );
-
-            callback(null, this.strategy.parseFilterResults(result));
-        } catch (err) {
-            callback(err);
+            conditions = result;
         }
+
+        const result = await this.workerAdapter.executeWorkerTask(
+            'executeQuery',
+            ['filter', [tableName, conditions, sortConfig, max]]
+        );
+        return this.workerAdapter.executeWorkerTask(
+            'parseResult',
+            ['parseFilterResults', result]
+        );
     }
 
     // Queue operations
-    async addInQueue(queueName, object, ensureUniqueness, callback) {
-        if (typeof ensureUniqueness === "function") {
-            callback = ensureUniqueness;
-            ensureUniqueness = false;
-        }
-
-        try {
-            const pk = await this.strategy.addInQueue(
-                this.connection,
-                queueName,
-                object,
-                ensureUniqueness
-            );
-            callback(null, pk);
-        } catch (err) {
-            callback(err);
-        }
+    async addInQueue(queueName, object, ensureUniqueness = false) {
+        return this.workerAdapter.executeWorkerTask(
+            'addInQueue',
+            [queueName, object, ensureUniqueness]
+        );
     }
 
-    queueSize(queueName, callback) {
-        this.count(queueName, callback);
+    async queueSize(queueName) {
+        return this.count(queueName);
     }
 
-    listQueue(queueName, sortAfterInsertTime, onlyFirstN, callback) {
-        if (typeof sortAfterInsertTime === "function") {
-            callback = sortAfterInsertTime;
-            sortAfterInsertTime = "asc";
-            onlyFirstN = undefined;
-        }
-
-        this.filter(queueName, [], sortAfterInsertTime, onlyFirstN, (err, results) => {
-            if (err) {
-                if (this.strategy.isTableNotExistsError?.(err)) {
-                    callback(undefined, []);
-                    return;
-                }
-                callback(err);
-                return;
-            }
-            callback(null, results.map(r => r.pk));
-        });
+    async listQueue(queueName, sortAfterInsertTime = 'asc', onlyFirstN = null) {
+        const results = await this.filter(queueName, [], sortAfterInsertTime, onlyFirstN);
+        return results.map(r => r.pk);
     }
 
-    async getObjectFromQueue(queueName, hash, callback) {
-        try {
-            const query = this.strategy.getObjectFromQueue(queueName, hash);
-            const result = await this.strategy.executeQuery(
-                this.connection,
-                query,
-                [hash]
-            );
-            callback(null, this.strategy.parseGetResult(result));
-        } catch (err) {
-            callback(err);
-        }
+    async getObjectFromQueue(queueName, hash) {
+        const result = await this.workerAdapter.executeWorkerTask(
+            'executeQuery',
+            ['getObjectFromQueue', [queueName, hash]]
+        );
+        return this.workerAdapter.executeWorkerTask(
+            'parseResult',
+            ['parseGetResult', result]
+        );
     }
 
-    async deleteObjectFromQueue(queueName, hash, callback) {
-        try {
-            const query = this.strategy.deleteObjectFromQueue(queueName, hash);
-            const result = await this.strategy.executeQuery(
-                this.connection,
-                query,
-                [hash]
-            );
-            callback(null, this.strategy.parseDeleteResult(result));
-        } catch (err) {
-            callback(err);
-        }
+    async deleteObjectFromQueue(queueName, hash) {
+        const result = await this.workerAdapter.executeWorkerTask(
+            'executeQuery',
+            ['deleteObjectFromQueue', [queueName, hash]]
+        );
+        return this.workerAdapter.executeWorkerTask(
+            'parseResult',
+            ['parseDeleteResult', result]
+        );
     }
 
     // Key-value operations
-    async writeKey(key, value, callback) {
-        try {
-            await this.initPromise;
+    async writeKey(key, value) {
+        let valueObject = {
+            type: typeof value,
+            value: value
+        };
 
-            let valueObject = {
-                type: typeof value,
-                value: value
+        if (Buffer.isBuffer(value)) {
+            valueObject = {
+                type: "buffer",
+                value: value.toString()
             };
-
-            if (Buffer.isBuffer(value)) {
-                valueObject = {
-                    type: "buffer",
-                    value: value.toString()
-                };
-            } else if (value !== null && typeof value === "object") {
-                valueObject = {
-                    type: "object",
-                    value: JSON.stringify(value)
-                };
-            }
-
-            const timestamp = Date.now();
-            const query = this.strategy.writeKey(this.READ_WRITE_KEY_TABLE);
-            const result = await this.strategy.executeQuery(
-                this.connection,
-                query,
-                [key, JSON.stringify(valueObject), timestamp]
-            );
-            callback(null, valueObject);
-        } catch (err) {
-            callback(err);
+        } else if (value !== null && typeof value === "object") {
+            valueObject = {
+                type: "object",
+                value: JSON.stringify(value)
+            };
         }
+
+        const timestamp = Date.now();
+        const result = await this.workerAdapter.executeWorkerTask(
+            'executeQuery',
+            ['writeKey', [this.READ_WRITE_KEY_TABLE, key, JSON.stringify(valueObject), timestamp]]
+        );
+        return valueObject;
     }
 
-    async readKey(key, callback) {
-        try {
-            await this.initPromise;
-            const query = this.strategy.readKey(this.READ_WRITE_KEY_TABLE);
-            const result = await this.strategy.executeQuery(
-                this.connection,
-                query,
-                [key]
-            );
+    async readKey(key) {
+        const result = await this.workerAdapter.executeWorkerTask(
+            'executeQuery',
+            ['readKey', [this.READ_WRITE_KEY_TABLE, key]]
+        );
 
-            const parsedResult = this.strategy.parseReadKeyResult(result);
-            if (!parsedResult) {
-                callback(null, null);
-                return;
-            }
+        const parsedResult = await this.workerAdapter.executeWorkerTask(
+            'parseResult',
+            ['parseReadKeyResult', result]
+        );
 
-            callback(null, typeof parsedResult === 'string' ? JSON.parse(parsedResult) : parsedResult);
-        } catch (err) {
-            callback(err);
+        if (!parsedResult) {
+            return null;
         }
+
+        return typeof parsedResult === 'string' ? JSON.parse(parsedResult) : parsedResult;
     }
 }
 

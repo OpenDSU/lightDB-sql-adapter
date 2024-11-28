@@ -4,7 +4,10 @@
   "description": "Universal SQL Adapter for LightDB",
   "main": "index.js",
   "scripts": {
-    "test": "mocha tests/sql-adapter-tests.js --timeout 10000"
+    "test": "mocha tests/**/*-tests.js --timeout 10000",
+    "test:adapter": "mocha tests/sql-adapter-tests.js --timeout 10000",
+    "test:worker": "mocha tests/sql-worker-tests.js --timeout 10000",
+    "test:imports": "mocha tests/test-imports.js --timeout 10000"
   },
   "dependencies": {
     "pg": "^8.11.3",
