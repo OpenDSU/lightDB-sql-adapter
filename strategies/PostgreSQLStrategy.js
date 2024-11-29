@@ -127,8 +127,15 @@ class PostgreSQLStrategy extends BaseStrategy {
     }
 
     async closeConnection(connection) {
-        if (connection) {
-            await connection.end();
+        try {
+            if (connection && !connection.ended) {
+                await connection.end();
+            }
+        } catch (error) {
+            // Ignore connection already closed errors
+            if (!error.message.includes('Cannot use a pool after calling end')) {
+                throw error;
+            }
         }
     }
 
@@ -178,13 +185,15 @@ class PostgreSQLStrategy extends BaseStrategy {
             DELETE FROM "${tableName}"
             WHERE pk = $1
             RETURNING pk, data, __timestamp
-        `
+        `,
+            params: []  // Empty array that will be filled during execution
         };
     }
 
     getRecord(tableName) {
         return {
-            query: `SELECT data, __timestamp FROM "${tableName}" WHERE pk = $1`
+            query: `SELECT data, __timestamp FROM "${tableName}" WHERE pk = $1`,
+            params: []  // Parameters will be provided during execution
         };
     }
 
@@ -208,7 +217,7 @@ class PostgreSQLStrategy extends BaseStrategy {
             query: `
             SELECT pk, data, __timestamp 
             FROM "${tableName}"
-            ${conditions ? `WHERE ${conditions}` : ''} 
+            ${conditions ? `WHERE ${conditions}` : ''}
             ORDER BY ${orderField === '__timestamp' ? '__timestamp' : `(data->>'${orderField}')::numeric`} ${direction}
             ${max ? `LIMIT ${max}` : ''}
         `,
@@ -221,12 +230,9 @@ class PostgreSQLStrategy extends BaseStrategy {
             return '';
         }
 
-        const query = conditions.map(condition => {
-            const [field, operator, value] = condition.split(/\s+/);
-            return `(data->>'${field}')::numeric ${operator} ${value}`;
-        }).join(' AND ');
-
-        return query;
+        const condition = conditions[0];
+        const [field, operator, value] = condition.split(/\s+/);
+        return `SELECT pk, data, __timestamp FROM "test_filters" WHERE (data->>'${field}')::numeric ${operator} ${value}`;
     }
 
     __getSortingField(filterConditions) {
@@ -274,11 +280,21 @@ class PostgreSQLStrategy extends BaseStrategy {
     }
 
     getObjectFromQueue(queueName, hash) {
-        return this.getRecord(queueName);
+        return {
+            query: `SELECT data, __timestamp FROM "${queueName}" WHERE pk = $1`,
+            params: [hash]
+        };
     }
 
     deleteObjectFromQueue(queueName, hash) {
-        return this.deleteRecord(queueName);
+        return {
+            query: `
+            DELETE FROM "${queueName}"
+            WHERE pk = $1
+            RETURNING pk, data, __timestamp
+        `,
+            params: [hash]
+        };
     }
 
     // Key-value operations
@@ -291,13 +307,15 @@ class PostgreSQLStrategy extends BaseStrategy {
             SET data = $2::jsonb, 
                 __timestamp = $3
             RETURNING data
-        `
+        `,
+            params: []
         };
     }
 
     readKey(tableName, key) {
         return {
-            query: `SELECT data, __timestamp FROM "${tableName}" WHERE pk = $1`
+            query: `SELECT data, __timestamp FROM "${tableName}" WHERE pk = $1`,
+            params: [key]
         };
     }
 

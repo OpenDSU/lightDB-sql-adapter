@@ -150,7 +150,7 @@ describe('SQL Worker Adapter Tests', () => {
                     }
                 });
 
-                it('should filter records with conditions', async () => {
+                it('should filter records with conditions', async function () {
                     const results = await db.filter('test_filters', ['score >= 20']);
                     assert.strictEqual(results.length, 2);
                     assert(results.every(r => r.score >= 20));
