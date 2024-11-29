@@ -44,45 +44,64 @@ async function executeMethod(method, params) {
     switch (method) {
         case 'executeQuery': {
             const [queryMethod, queryParams] = params;
-            const query = strategy[queryMethod](...queryParams);
 
-            if (Array.isArray(query)) {
-                return await strategy.executeTransaction(connection, query);
+            // For methods that need table creation
+            if (['insertRecord', 'filter', 'queueSize', 'listQueue'].includes(queryMethod)) {
+                const tableName = queryParams[0];
+                await strategy.ensureTableExists(connection, tableName);
             }
 
+            // Special handling for filter operations
+            if (queryMethod === 'filter') {
+                const [tableName, conditions, sort, max] = queryParams;
+                let conditionsQuery = '';
+                if (conditions && conditions.length > 0) {
+                    conditionsQuery = strategy.convertConditionsToLokiQuery(conditions);
+                }
+
+                return await strategy.executeQuery(
+                    connection,
+                    strategy.filter(tableName, conditionsQuery, sort, max)
+                );
+            }
+
+            // Handle record operations
             if (['insertRecord', 'updateRecord'].includes(queryMethod)) {
-                const [tableName, pk, data] = queryParams;
-                const result = await strategy.executeQuery(
-                    connection,
-                    query,
-                    [pk, JSON.stringify(data), Date.now()]
-                );
-                return await strategy.parseInsertResult(result);
+                const query = strategy[queryMethod](...queryParams);
+                const [tableName, pk, recordData, timestamp] = queryParams;
+                const data = typeof recordData === 'string' ? recordData : JSON.stringify(recordData);
+                return await strategy.executeQuery(connection, query, [pk, data, timestamp]);
             }
 
-            if (queryMethod === 'deleteRecord') {
-                const [tableName, pk] = queryParams;
-                const result = await strategy.executeQuery(connection, query, [pk]);
-                return strategy.parseDeleteResult(result);
+            // Handle queue operations
+            if (queryMethod === 'queueSize') {
+                const query = strategy.queueSize(...queryParams);
+                return await strategy.executeQuery(connection, query);
             }
 
-            if (queryMethod === 'writeKey') {
-                const [tableName, key, value] = queryParams;
-                const result = await strategy.executeQuery(
-                    connection,
-                    query,
-                    [key, JSON.stringify(value), Date.now()]
-                );
-                return strategy.parseWriteKeyResult(result);
+            if (queryMethod === 'listQueue') {
+                const query = strategy.listQueue(...queryParams);
+                return await strategy.executeQuery(connection, query);
             }
 
-            if (queryMethod === 'readKey') {
+            // Handle key-value operations
+            if (['writeKey', 'readKey'].includes(queryMethod)) {
+                const query = strategy[queryMethod](...queryParams);
+                if (queryMethod === 'writeKey') {
+                    const [tableName, key, value, timestamp] = queryParams;
+                    return await strategy.executeQuery(connection, query, [key, value, timestamp]);
+                }
                 const [tableName, key] = queryParams;
-                const result = await strategy.executeQuery(connection, query, [key]);
-                return strategy.parseReadKeyResult(result);
+                return await strategy.executeQuery(connection, query, [key]);
             }
 
-            return await strategy.executeQuery(connection, query, queryParams.slice(1));
+            // Default query execution
+            const query = strategy[queryMethod](...queryParams);
+            return await strategy.executeQuery(
+                connection,
+                query,
+                Array.isArray(queryParams.slice(1)) ? queryParams.slice(1) : []
+            );
         }
         case 'executeTransaction': {
             const [transactionMethod, transactionParams] = params;
