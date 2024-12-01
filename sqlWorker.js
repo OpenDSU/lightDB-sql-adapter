@@ -92,17 +92,27 @@ async function executeMethod(method, params) {
             if (queryMethod === 'filter') {
                 const [tableName, conditions, sort, max] = queryParams;
                 await ensureTableExists(tableName);
+
+                // Convert conditions to WHERE clause
                 const whereClause = conditions && conditions.length > 0
                     ? strategy.convertConditionsToLokiQuery(conditions)
                     : '';
 
-                // Call filter with the complete WHERE clause
+                // Get complete query
                 const query = strategy.filter(tableName, whereClause, sort, max);
-                // Execute the complete query instead of just the condition
-                return await strategy.executeQuery(connection, query.query, []);
+
+                // Execute the complete query
+                if (typeof query === 'object' && query.query) {
+                    return await strategy.executeQuery(connection, query.query, query.params || []);
+                }
+                return await strategy.executeQuery(connection, query, []);
             }
 
             // Handle queue operations
+            if (queryMethod === 'queueSize' || queryMethod === 'listQueue') {
+                const tableName = queryParams[0];
+                await ensureTableExists(tableName);
+            }
             if (queryMethod === 'queueSize') {
                 const query = strategy.queueSize(queryParams[0]);
                 return await strategy.executeQuery(connection, query.query, query.params || []);
@@ -155,7 +165,9 @@ async function executeMethod(method, params) {
 
         case 'addInQueue': {
             const [queueName, object, ensureUniqueness] = params;
-            await strategy.ensureTableExists(connection, queueName);
+            // First create table
+            await strategy.executeQuery(connection, strategy.createKeyValueTable(queueName));
+
             const hash = crypto.createHash('sha256').update(JSON.stringify(object)).digest('hex');
             const pk = ensureUniqueness ? `${hash}_${Date.now()}_${crypto.randomBytes(5).toString('hex')}` : hash;
 

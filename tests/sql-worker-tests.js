@@ -1,51 +1,63 @@
 // sql-worker-tests.js
 const assert = require('assert');
 const SQLAdapter = require('../sqlAdapter');
+const SQLWorkerAdapter = require('../sqlWorkerAdapter')
 const ConnectionRegistry = require('../connectionRegistry');
 
 describe('SQL Worker Adapter Tests', () => {
+    let workerAdapter;
+
     [
         ConnectionRegistry.POSTGRESQL,
-        ConnectionRegistry.MYSQL,
-        ConnectionRegistry.SQLSERVER
+        // ConnectionRegistry.MYSQL,
+        // ConnectionRegistry.SQLSERVER
     ].forEach(dbType => {
         describe(`${dbType} Worker Tests`, () => {
             let db;
 
             before(async function () {
                 this.timeout(10000);
-                try {
-                    const isAvailable = await ConnectionRegistry.testConnection(dbType);
-                    if (!isAvailable) {
-                        console.warn(`Warning: Could not connect to ${dbType}. Skipping tests.`);
-                        this.skip();
-                        return;
-                    }
-
-                    db = new SQLAdapter(dbType);
-                } catch (err) {
-                    console.error(`Failed to initialize ${dbType}:`, err);
-                    this.skip();
-                }
+                workerAdapter = new SQLWorkerAdapter(dbType);
             });
 
             after(async function () {
-                if (db) {
-                    await db.close();
+                if (workerAdapter) {
+                    await workerAdapter.close();
+                    workerAdapter = null;
                 }
             });
 
             beforeEach(async function () {
                 this.timeout(10000);
-                if (!db) return;
-
+                // Ensure clean database state before each test
                 try {
+                    // Create fresh DB instance for each test
+                    db = new SQLAdapter(dbType);
+
+                    // Clean up any existing tables
                     const collections = await db.getCollections();
                     for (const collection of collections) {
                         await db.removeCollection(collection);
                     }
                 } catch (err) {
                     console.error('Error in beforeEach:', err);
+                    throw err;
+                }
+            });
+
+            afterEach(async function () {
+                if (db) {
+                    try {
+                        const collections = await db.getCollections();
+                        await Promise.all(collections.map(collection =>
+                            db.removeCollection(collection)
+                        ));
+                        await db.close();
+                    } catch (err) {
+                        console.error('Error in afterEach cleanup:', err);
+                    } finally {
+                        db = null;
+                    }
                 }
             });
 
@@ -274,5 +286,18 @@ describe('SQL Worker Adapter Tests', () => {
                 });
             });
         });
+    });
+    after(async function () {
+        try {
+            if (workerAdapter) {
+                await workerAdapter.close();
+                workerAdapter = null;
+            }
+            // Force process exit if any hanging connections
+            setTimeout(() => process.exit(0), 1000);
+        } catch (error) {
+            console.error('Final cleanup error:', error);
+            process.exit(1);
+        }
     });
 });

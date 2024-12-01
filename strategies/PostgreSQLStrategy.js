@@ -118,7 +118,8 @@ class PostgreSQLStrategy extends BaseStrategy {
     }
 
     count(tableName) {
-        return `SELECT COUNT(*) as count FROM "${tableName}"`;
+        return `SELECT COUNT(*) as count
+                FROM "${tableName}"`;
     }
 
     // Database state management
@@ -182,30 +183,34 @@ class PostgreSQLStrategy extends BaseStrategy {
     deleteRecord(tableName) {
         return {
             query: `
-            DELETE FROM "${tableName}"
-            WHERE pk = $1
-            RETURNING pk, data, __timestamp
-        `,
+                DELETE
+                FROM "${tableName}"
+                WHERE pk = $1 RETURNING pk, data, __timestamp
+            `,
             params: []  // Empty array that will be filled during execution
         };
     }
 
     getRecord(tableName) {
         return {
-            query: `SELECT data, __timestamp FROM "${tableName}" WHERE pk = $1`,
+            query: `SELECT data, __timestamp
+                    FROM "${tableName}"
+                    WHERE pk = $1`,
             params: []  // Parameters will be provided during execution
         };
     }
 
     getOneRecord(tableName) {
         return {
-            query: `SELECT data, __timestamp FROM "${tableName}" LIMIT 1`
+            query: `SELECT data, __timestamp
+                    FROM "${tableName}" LIMIT 1`
         };
     }
 
     getAllRecords(tableName) {
         return {
-            query: `SELECT pk, data, __timestamp FROM "${tableName}"`
+            query: `SELECT pk, data, __timestamp
+                    FROM "${tableName}"`
         };
     }
 
@@ -215,12 +220,10 @@ class PostgreSQLStrategy extends BaseStrategy {
 
         return {
             query: `
-            SELECT pk, data, __timestamp 
-            FROM "${tableName}"
-            ${conditions ? `WHERE ${conditions}` : ''}
-            ORDER BY ${orderField === '__timestamp' ? '__timestamp' : `(data->>'${orderField}')::numeric`} ${direction}
-            ${max ? `LIMIT ${max}` : ''}
-        `,
+                SELECT pk, data, __timestamp
+                FROM "${tableName}" ${conditions ? `WHERE ${conditions}` : ''}
+                ORDER BY ${orderField === '__timestamp' ? '__timestamp' : `(data->>'${orderField}')`} ${direction} ${max ? `LIMIT ${max}` : ''}
+            `,
             params: []
         };
     }
@@ -230,9 +233,12 @@ class PostgreSQLStrategy extends BaseStrategy {
             return '';
         }
 
-        const condition = conditions[0];
-        const [field, operator, value] = condition.split(/\s+/);
-        return `SELECT pk, data, __timestamp FROM "test_filters" WHERE (data->>'${field}')::numeric ${operator} ${value}`;
+        const andConditions = conditions.map(condition => {
+            const [field, operator, value] = condition.split(/\s+/);
+            return this.formatFilterCondition(field, operator, value);
+        });
+
+        return andConditions.join(' AND ');
     }
 
     __getSortingField(filterConditions) {
@@ -244,8 +250,9 @@ class PostgreSQLStrategy extends BaseStrategy {
     }
 
     formatFilterCondition(field, operator, value) {
-        return `(data->>'${field}')::numeric ${operator} ${value}`;
+        return `(data->>'${field}')::numeric ${operator} ${value.replace(/['"]/g, '')}`;
     }
+
 
     // Queue operations
     async addInQueue(connection, queueName, object, ensureUniqueness = false) {
@@ -264,24 +271,27 @@ class PostgreSQLStrategy extends BaseStrategy {
 
     queueSize(queueName) {
         return {
-            query: `SELECT COUNT(*)::int as count FROM "${queueName}"`
+            query: `SELECT COUNT(*) as count
+                    FROM "${queueName}"`
         };
     }
 
     listQueue(queueName, sortAfterInsertTime = 'asc', onlyFirstN) {
         return {
             query: `
-            SELECT pk, data, __timestamp
-            FROM "${queueName}"
-            ORDER BY __timestamp ${sortAfterInsertTime.toUpperCase()}
-            ${onlyFirstN ? `LIMIT ${onlyFirstN}` : ''}
-        `
+                SELECT pk, data, __timestamp
+                FROM "${queueName}"
+                ORDER BY __timestamp ${sortAfterInsertTime.toUpperCase()}
+                             ${onlyFirstN ? `LIMIT ${onlyFirstN}` : ''}
+            `
         };
     }
 
     getObjectFromQueue(queueName, hash) {
         return {
-            query: `SELECT data, __timestamp FROM "${queueName}" WHERE pk = $1`,
+            query: `SELECT data, __timestamp
+                    FROM "${queueName}"
+                    WHERE pk = $1`,
             params: [hash]
         };
     }
@@ -289,10 +299,10 @@ class PostgreSQLStrategy extends BaseStrategy {
     deleteObjectFromQueue(queueName, hash) {
         return {
             query: `
-            DELETE FROM "${queueName}"
-            WHERE pk = $1
-            RETURNING pk, data, __timestamp
-        `,
+                DELETE
+                FROM "${queueName}"
+                WHERE pk = $1 RETURNING pk, data, __timestamp
+            `,
             params: [hash]
         };
     }
@@ -314,7 +324,9 @@ class PostgreSQLStrategy extends BaseStrategy {
 
     readKey(tableName, key) {
         return {
-            query: `SELECT data, __timestamp FROM "${tableName}" WHERE pk = $1`,
+            query: `SELECT data, __timestamp
+                    FROM "${tableName}"
+                    WHERE pk = $1`,
             params: [key]
         };
     }
@@ -347,7 +359,13 @@ class PostgreSQLStrategy extends BaseStrategy {
 
     // Result parsing methods
     parseCountResult(result) {
-        return parseInt(result.rows[0].count);
+        try {
+            if (!result?.rows?.[0]) return 0;
+            return parseInt(result.rows[0].count, 10) || 0;
+        } catch (e) {
+            console.error('Error parsing count:', e);
+            return 0;
+        }
     }
 
     parseCollectionsResult(result) {
@@ -404,7 +422,20 @@ class PostgreSQLStrategy extends BaseStrategy {
     parseGetResult(result) {
         if (!result?.rows?.[0]) return null;
         try {
-            return result.rows[0].data;
+            const data = result.rows[0].data;
+            if (!data) return null;
+
+            if (data.type === 'object') {
+                try {
+                    return {
+                        type: data.type,
+                        value: JSON.parse(data.value)
+                    };
+                } catch (e) {
+                    return data;
+                }
+            }
+            return data;
         } catch (e) {
             console.error('Error parsing get result:', e);
             return null;
