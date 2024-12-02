@@ -5,11 +5,11 @@
   "main": "index.js",
   "scripts": {
     "test": "mocha tests/**/*-tests.js --timeout 10000",
-    "test:adapter": "mocha tests/sql-adapter-tests.js --timeout 10000",
-    "test:worker": "DEBUG=true mocha tests/sql-worker-tests.js --timeout 10000",
+    "test:adapter": "DEBUG=true mocha tests/pgsql-adapter-tests.js --timeout 10000",
     "test:imports": "mocha tests/test-imports.js --timeout 10000"
   },
   "dependencies": {
+    "syndicate": "github:opendsu/syndicate",
     "pg": "^8.11.3",
     "mysql2": "^3.6.1",
     "mssql": "^10.0.1"
