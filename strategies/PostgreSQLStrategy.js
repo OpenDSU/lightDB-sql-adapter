@@ -163,18 +163,30 @@ class PostgreSQLStrategy extends BaseStrategy {
     }
 
     async refresh(connection, callback) {
+        const result = {message: "Refresh completed"};
         if (typeof callback === 'function') {
-            callback();
+            callback(null, result);
         }
+        return result;
     }
 
     async refreshAsync(connection) {
-        return Promise.resolve();
+        return {message: "Refresh completed"};
     }
 
     async saveDatabase(connection, callback) {
-        if (typeof callback === 'function') {
-            callback(undefined, {message: "Database saved"});
+        try {
+            // PostgreSQL auto-commits, so we just return a success message
+            const result = {message: "Database saved"};
+            if (typeof callback === 'function') {
+                callback(null, result);
+            }
+            return result;
+        } catch (error) {
+            if (typeof callback === 'function') {
+                callback(error);
+            }
+            throw error;
         }
     }
 
@@ -231,30 +243,66 @@ class PostgreSQLStrategy extends BaseStrategy {
         };
     }
 
-    filter(tableName, conditions, sort, max) {
-        const orderField = sort?.field || '__timestamp';
-        const direction = (sort?.direction || 'ASC').toUpperCase();
-
-        return {
-            query: `
+    filter(tableName, conditions, sort = {}, max = null) {
+        try {
+            let query = `
             SELECT pk, data, __timestamp 
-            FROM "${tableName}"
-            ${conditions ? `WHERE ${conditions}` : ''}
-            ORDER BY ${orderField === '__timestamp' ? '__timestamp' : `(data->>'${orderField}')::numeric`} ${direction}
-            ${max ? `LIMIT ${max}` : ''}
-        `,
-            params: []
-        };
+            FROM "${tableName}"`;
+
+            // Convert the conditions to PostgreSQL syntax
+            if (conditions && conditions.length > 0) {
+                const whereClause = this.convertConditionsToLokiQuery(conditions);
+                if (whereClause) {
+                    query += ` WHERE ${whereClause}`;
+                }
+            }
+
+            // Handle sorting
+            const sortField = sort.field || '__timestamp';
+            const direction = (sort.direction || 'ASC').toUpperCase();
+            query += ` ORDER BY ${sortField === '__timestamp' ? '__timestamp' : `(data->>'${sortField}')`} ${direction}`;
+
+            // Handle limit
+            if (max) {
+                query += ` LIMIT ${max}`;
+            }
+
+            if (process.env.DEBUG) {
+                console.log('Generated filter query:', query);
+                console.log('With conditions:', conditions);
+            }
+
+            return query;
+        } catch (err) {
+            throw new Error(`Error building filter query: ${err.message}`);
+        }
     }
 
     convertConditionsToLokiQuery(conditions) {
-        if (!conditions || conditions.length === 0) {
+        if (!conditions || !Array.isArray(conditions) || conditions.length === 0) {
             return '';
         }
 
-        const condition = conditions[0];
-        const [field, operator, value] = condition.split(/\s+/);
-        return `SELECT pk, data, __timestamp FROM "test_filters" WHERE (data->>'${field}')::numeric ${operator} ${value}`;
+        try {
+            const andConditions = conditions.map(condition => {
+                if (typeof condition !== 'string') {
+                    throw new Error('Invalid condition format');
+                }
+
+                const parts = condition.trim().split(/\s+/);
+                if (parts.length !== 3) {
+                    throw new Error(`Invalid condition structure: ${condition}`);
+                }
+
+                const [field, operator, value] = parts;
+                // Ensure numeric comparison for score field
+                return `(data->>'${field}')::numeric ${operator} ${value}`;
+            });
+
+            return andConditions.join(' AND ');
+        } catch (err) {
+            throw new Error(`Error processing filter conditions: ${err.message}`);
+        }
     }
 
     __getSortingField(filterConditions) {
@@ -532,11 +580,14 @@ class PostgreSQLStrategy extends BaseStrategy {
 
             // Execute the query using the pool directly
             const result = await connection.query(queryText, queryParams);
-            return result;
 
+            // Clean the result before returning
+            return JSON.parse(JSON.stringify(result));
         } catch (error) {
-            console.error('Query execution error:', error);
-            throw error;
+            const serializableError = new Error(error.message);
+            serializableError.code = error.code;
+            serializableError.type = 'DatabaseError';
+            throw serializableError;
         }
     }
 
