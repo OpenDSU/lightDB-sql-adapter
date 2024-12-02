@@ -70,10 +70,15 @@ class ConnectionRegistry {
         try {
             switch (dbType) {
                 case 'postgresql':
-                    connection = new Pool(config);
+                    // Create a pool with proper configuration
+                    const pool = new Pool({
+                        ...config,
+                        max: config.max || 20,
+                        idleTimeoutMillis: config.idleTimeoutMillis || 30000
+                    });
                     // Test the connection
-                    await connection.query('SELECT 1');
-                    break;
+                    await pool.query('SELECT 1');
+                    return pool;
 
                 case 'mysql':
                     connection = await mysql.createPool(config);
@@ -93,15 +98,7 @@ class ConnectionRegistry {
             return connection;
         } catch (error) {
             if (connection) {
-                switch (dbType) {
-                    case 'postgresql':
-                    case 'mysql':
-                        await connection.end();
-                        break;
-                    case 'sqlserver':
-                        await connection.close();
-                        break;
-                }
+                await connection.end().catch(console.error);
             }
             throw new Error(`Failed to connect to ${type}: ${error.message}`);
         }

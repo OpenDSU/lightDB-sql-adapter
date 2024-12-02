@@ -1,283 +1,498 @@
-// sqlAdapter.js
-const crypto = require('crypto');
-const SQLWorkerAdapter = require('./sqlWorkerAdapter');
+const syndicate = require('syndicate');
+const {isMainThread, parentPort} = require('worker_threads');
+const {StrategyFactory} = require('./strategyFactory');
 
-class SQLAdapter {
-    constructor(type) {
-        this.type = type;
-        this.workerAdapter = new SQLWorkerAdapter(type);
-        this.READ_WRITE_KEY_TABLE = "KeyValueTable";
-        this.debug = process.env.DEBUG === 'true';
+if (isMainThread) {
+    class SQLAdapter {
+        constructor(type) {
+            this.type = type;
+            this.READ_WRITE_KEY_TABLE = "KeyValueTable";
+            this.debug = process.env.DEBUG === 'true';
 
-        // Forward worker events
-        this.workerAdapter.on('error', error => console.error('Worker error:', error));
-        this.workerAdapter.on('exit', code => {
-            if (code !== 0) {
-                console.error(`Worker stopped with exit code ${code}`);
+            // Create a worker pool
+            this.workerPool = syndicate.createWorkerPool({
+                bootScript: __filename,
+                maximumNumberOfWorkers: 4,
+                workerOptions: {
+                    workerData: {type: this.type}
+                }
+            });
+        }
+
+        async close() {
+            try {
+                // Check if pool cleanup methods exist before calling
+                if (this.workerPool && typeof this.workerPool.drain === 'function') {
+                    await this.workerPool.drain();
+                }
+                if (this.workerPool && typeof this.workerPool.clear === 'function') {
+                    await this.workerPool.clear();
+                }
+                if (this.workerPool && typeof this.workerPool.terminate === 'function') {
+                    await this.workerPool.terminate();
+                }
+            } catch (error) {
+                console.error('Error closing worker pool:', error);
+                throw error;
             }
-        });
+        }
+
+        _executeTask(taskName, args) {
+            return new Promise((resolve, reject) => {
+                this.workerPool.addTask({taskName, args}, (err, result) => {
+                    if (err) reject(err);
+                    else resolve(result.success ? result.result : Promise.reject(result.error));
+                });
+            });
+        }
+
+        refresh(callback) {
+            this._executeTask('refresh', [])
+                .then(() => callback())
+                .catch(error => callback(error));
+        }
+
+        async refreshAsync() {
+            return this._executeTask('refresh', []);
+        }
+
+        saveDatabase(callback) {
+            this._executeTask('saveDatabase', [])
+                .then(() => callback(undefined, {message: "Database saved"}))
+                .catch(error => callback(error));
+        }
+
+        async saveDatabaseAsync() {
+            await this._executeTask('saveDatabase', []);
+            return {message: "Database saved"};
+        }
+
+        async count(tableName) {
+            return this._executeTask('count', [tableName]);
+        }
+
+        getCollections(callback) {
+            this._executeTask('getCollections', [])
+                .then(result => callback(null, result))
+                .catch(error => callback(error));
+        }
+
+        createCollection(tableName, indicesList, callback) {
+            this._executeTask('createCollection', [tableName, indicesList])
+                .then(result => callback(null, result))
+                .catch(error => {
+                    // Convert raw error to Error instance
+                    const err = error instanceof Error ? error : new Error(error.message);
+                    err.isTestError = error.isTestError;
+                    callback(err);
+                });
+        }
+
+        removeCollection(tableName, callback) {
+            this._executeTask('removeCollection', [tableName])
+                .then(() => callback())
+                .catch(error => callback(error));
+        }
+
+        async removeCollectionAsync(tableName) {
+            return this._executeTask('removeCollectionAsync', [tableName]);
+        }
+
+        addIndex(tableName, property, callback) {
+            this._executeTask('addIndex', [tableName, property])
+                .then(() => callback())
+                .catch(error => callback(error));
+        }
+
+        getOneRecord(tableName, callback) {
+            this._executeTask('getOneRecord', [tableName])
+                .then(result => callback(null, result))
+                .catch(error => callback(error));
+        }
+
+        getAllRecords(tableName, callback) {
+            this._executeTask('getAllRecords', [tableName])
+                .then(result => callback(null, result))
+                .catch(error => callback(error));
+        }
+
+        insertRecord(tableName, pk, record, callback) {
+            this._executeTask('insertRecord', [tableName, pk, record])
+                .then(result => callback(null, result))
+                .catch(error => callback(error));
+        }
+
+        updateRecord(tableName, pk, record, callback) {
+            this._executeTask('updateRecord', [tableName, pk, record])
+                .then(result => callback(null, result))
+                .catch(error => callback(error));
+        }
+
+        deleteRecord(tableName, pk, callback) {
+            this._executeTask('deleteRecord', [tableName, pk])
+                .then(result => callback(null, result))
+                .catch(error => callback(error));
+        }
+
+        getRecord(tableName, pk, callback) {
+            this._executeTask('getRecord', [tableName, pk])
+                .then(result => callback(null, result))
+                .catch(error => callback(error));
+        }
+
+        filter(tableName, filterConditions = [], sort = 'asc', max = null, callback) {
+            this._executeTask('filter', [tableName, filterConditions, sort, max])
+                .then(result => callback(null, result))
+                .catch(error => callback(error));
+        }
+
+        addInQueue(queueName, object, ensureUniqueness = false, callback) {
+            this._executeTask('addInQueue', [queueName, object, ensureUniqueness])
+                .then(result => callback(null, result))
+                .catch(error => callback(error));
+        }
+
+        queueSize(queueName, callback) {
+            this.count(queueName)
+                .then(result => callback(null, result))
+                .catch(error => callback(error));
+        }
+
+        listQueue(queueName, sortAfterInsertTime = 'asc', onlyFirstN = null, callback) {
+            this._executeTask('listQueue', [queueName, sortAfterInsertTime, onlyFirstN])
+                .then(result => callback(null, result))
+                .catch(error => callback(error));
+        }
+
+        getObjectFromQueue(queueName, hash, callback) {
+            this._executeTask('getObjectFromQueue', [queueName, hash])
+                .then(result => callback(null, result))
+                .catch(error => callback(error));
+        }
+
+        deleteObjectFromQueue(queueName, hash, callback) {
+            this._executeTask('deleteObjectFromQueue', [queueName, hash])
+                .then(result => callback(null, result))
+                .catch(error => callback(error));
+        }
+
+        writeKey(key, value, callback) {
+            let valueObject = {
+                type: typeof value,
+                value: value
+            };
+
+            if (Buffer.isBuffer(value)) {
+                valueObject = {
+                    type: "buffer",
+                    value: value.toString()
+                };
+            } else if (value !== null && typeof value === "object") {
+                valueObject = {
+                    type: "object",
+                    value: JSON.stringify(value)
+                };
+            }
+
+            this._executeTask('writeKey', [key, valueObject])
+                .then(result => callback(null, result))
+                .catch(error => callback(error));
+        }
+
+        readKey(key, callback) {
+            this._executeTask('readKey', [key])
+                .then(result => {
+                    if (!result) {
+                        return callback(null, null);
+                    }
+                    const parsed = typeof result === 'string' ? JSON.parse(result) : result;
+                    callback(null, parsed);
+                })
+                .catch(error => callback(error));
+        }
     }
 
-    async close() {
-        await this.workerAdapter.close();
-    }
+    module.exports = SQLAdapter;
 
-    refresh(callback) {
-        // Even though this is a no-op, we'll still run it through the worker
-        // to maintain consistency with the worker pattern
-        this.workerAdapter.executeWorkerTask('refresh', [])
-            .then(() => callback())
-            .catch(error => callback(error));
-    }
+} else {
+    // Worker code
+    const {workerData} = require('worker_threads');
+    const {StrategyFactory} = require('./strategyFactory');
+    const strategy = StrategyFactory.createStrategy(workerData.type);
 
-    async refreshAsync() {
-        return this.workerAdapter.executeWorkerTask('refresh', []);
-    }
+    // Create a pool at worker initialization
+    const ConnectionRegistry = require('./connectionRegistry');
+    let pool = null;
 
-    saveDatabase(callback) {
-        this.workerAdapter.executeWorkerTask('saveDatabase', [])
-            .then(result => callback(undefined, {message: "Database saved"}))
-            .catch(error => callback(error));
-    }
-
-    async saveDatabaseAsync() {
-        await this.workerAdapter.executeWorkerTask('saveDatabase', []);
-        return {message: "Database saved"};
-    }
-
-    async count(tableName) {
-        const result = await this.workerAdapter.executeWorkerTask(
-            'executeQuery',
-            ['count', [tableName]]
-        );
-        return this.workerAdapter.executeWorkerTask(
-            'parseResult',
-            ['parseCountResult', result]
-        );
-    }
-
-    async getCollections() {
-        const result = await this.workerAdapter.executeWorkerTask(
-            'executeQuery',
-            ['getCollections', []]
-        );
-        return this.workerAdapter.executeWorkerTask(
-            'parseResult',
-            ['parseCollectionsResult', result]
-        );
-    }
-
-    async createCollection(tableName, indicesList) {
+    async function initializePool() {
         try {
-            const result = await this.workerAdapter.executeWorkerTask(
-                'executeQuery',
-                ['createCollection', [tableName, indicesList]]
-            );
-            return {message: `Collection ${tableName} created`};
+            pool = await ConnectionRegistry.createConnection(workerData.type);
+            if (process.env.DEBUG) {
+                console.log('Pool initialized:', pool ? 'yes' : 'no');
+                console.log('Pool type:', pool ? Object.getPrototypeOf(pool).constructor.name : 'N/A');
+            }
+            return pool;
         } catch (error) {
-            // Convert complex error to simple string
-            const errorMessage = error.message || 'Unknown error occurred';
-            throw new Error(`Failed to create collection: ${errorMessage}`);
+            console.error('Pool initialization error:', error);
+            throw error;
         }
     }
 
-    async removeCollection(tableName) {
-        return this.workerAdapter.executeWorkerTask(
-            'executeTransaction',
-            ['removeCollection', [tableName]]
-        );
-    }
+    parentPort.on('message', async (message) => {
+        const {taskName, args} = message;
 
-    async removeCollectionAsync(tableName) {
-        return this.workerAdapter.executeWorkerTask(
-            'executeQuery',
-            ['removeCollectionAsync', [tableName]]
-        );
-    }
+        try {
+            if (!pool) {
+                await initializePool();
+                await strategy.ensureCollectionsTable(pool);
+            }
 
-    async addIndex(tableName, property) {
-        return this.workerAdapter.executeWorkerTask(
-            'executeQuery',
-            ['addIndex', [tableName, property]]
-        );
-    }
+            let result;
+            if (process.env.DEBUG) {
+                console.log('Task:', taskName);
+                console.log('Args:', args);
+            }
 
-    async getOneRecord(tableName) {
-        const result = await this.workerAdapter.executeWorkerTask(
-            'executeQuery',
-            ['getOneRecord', [tableName]]
-        );
-        return this.workerAdapter.executeWorkerTask(
-            'parseResult',
-            ['parseGetResult', result]
-        );
-    }
+            switch (taskName) {
+                case 'refresh':
+                    result = await strategy.refresh(pool);
+                    break;
 
-    async getAllRecords(tableName) {
-        const result = await this.workerAdapter.executeWorkerTask(
-            'executeQuery',
-            ['getAllRecords', [tableName]]
-        );
-        return this.workerAdapter.executeWorkerTask(
-            'parseResult',
-            ['parseFilterResults', result]
-        );
-    }
+                case 'saveDatabase':
+                    result = await strategy.saveDatabase(pool);
+                    break;
 
-    async insertRecord(tableName, pk, record) {
-        const timestamp = Date.now();
-        const result = await this.workerAdapter.executeWorkerTask(
-            'executeQuery',
-            ['insertRecord', [tableName, pk, JSON.stringify(record), timestamp]]
-        );
-        return this.workerAdapter.executeWorkerTask(
-            'parseResult',
-            ['parseInsertResult', [result, pk, record]]
-        );
-    }
+                case 'count':
+                    const countQuery = strategy.count(args[0]);
+                    result = await strategy.executeQuery(pool, countQuery);
+                    result = strategy.parseCountResult(result);
+                    break;
 
-    async updateRecord(tableName, pk, record) {
-        const timestamp = Date.now();
-        const result = await this.workerAdapter.executeWorkerTask(
-            'executeQuery',
-            ['updateRecord', [tableName, pk, JSON.stringify(record), timestamp]]
-        );
-        return this.workerAdapter.executeWorkerTask(
-            'parseResult',
-            ['parseUpdateResult', result]
-        );
-    }
+                case 'getCollections':
+                    const collectionsQuery = strategy.getCollections();
+                    result = await strategy.executeQuery(pool, collectionsQuery);
+                    result = strategy.parseCollectionsResult(result);
+                    break;
 
-    async deleteRecord(tableName, pk) {
-        const result = await this.workerAdapter.executeWorkerTask(
-            'executeQuery',
-            ['deleteRecord', [tableName, pk]]
-        );
-        return this.workerAdapter.executeWorkerTask(
-            'parseResult',
-            ['parseDeleteResult', [result, pk]]
-        );
-    }
+                case 'createCollection':
+                    try {
+                        // Make sure collections table exists
+                        await strategy.ensureCollectionsTable(pool);
 
-    async getRecord(tableName, pk) {
-        const result = await this.workerAdapter.executeWorkerTask(
-            'executeQuery',
-            ['getRecord', [tableName, pk]]
-        );
-        return this.workerAdapter.executeWorkerTask(
-            'parseResult',
-            ['parseGetResult', result]
-        );
-    }
+                        const createQueries = strategy.createCollection(args[0], args[1]);
+                        if (process.env.DEBUG) {
+                            console.log('Create queries:', createQueries);
+                        }
 
-    async filter(tableName, filterConditions = [], sort = 'asc', max = null) {
-        let conditions = '';
-        let sortConfig = {
-            field: '__timestamp',
-            direction: (sort === 'desc' ? 'DESC' : 'ASC')
-        };
+                        result = await strategy.executeTransaction(pool, createQueries);
 
-        if (filterConditions && filterConditions.length) {
-            const result = await this.workerAdapter.executeWorkerTask(
-                'executeQuery',
-                ['convertConditionsToLokiQuery', [filterConditions]]
-            );
-            conditions = result;
-        }
+                        // Then verify the collection exists
+                        const collectionsQuery = strategy.getCollections();
+                        const verifyResult = await strategy.executeQuery(pool, collectionsQuery);
+                        const collections = strategy.parseCollectionsResult(verifyResult);
 
-        const result = await this.workerAdapter.executeWorkerTask(
-            'executeQuery',
-            ['filter', [tableName, conditions, sortConfig, max]]
-        );
-        return this.workerAdapter.executeWorkerTask(
-            'parseResult',
-            ['parseFilterResults', result]
-        );
-    }
+                        if (!collections.includes(args[0])) {
+                            throw new Error(`Failed to create collection ${args[0]}`);
+                        }
 
-    // Queue operations
-    async addInQueue(queueName, object, ensureUniqueness = false) {
-        return this.workerAdapter.executeWorkerTask(
-            'addInQueue',
-            [queueName, object, ensureUniqueness]
-        );
-    }
+                        result = {
+                            success: true,
+                            message: `Collection ${args[0]} created`,
+                            collections: collections
+                        };
+                    } catch (error) {
+                        console.error('Collection creation error:', error);
+                        throw error;
+                    }
+                    break;
 
-    async queueSize(queueName) {
-        return this.count(queueName);
-    }
+                case 'removeCollection':
+                    const removeQueries = strategy.removeCollection(args[0]);
+                    result = await strategy.executeTransaction(pool, removeQueries);
+                    result = serializeResult(result); // Serialize before sending
+                    break;
 
-    async listQueue(queueName, sortAfterInsertTime = 'asc', onlyFirstN = null) {
-        const results = await this.filter(queueName, [], sortAfterInsertTime, onlyFirstN);
-        return results.map(r => r.pk);
-    }
+                case 'addIndex':
+                    const indexQuery = strategy.addIndex(args[0], args[1]);
+                    result = await strategy.executeQuery(pool, indexQuery);
+                    break;
 
-    async getObjectFromQueue(queueName, hash) {
-        const result = await this.workerAdapter.executeWorkerTask(
-            'executeQuery',
-            ['getObjectFromQueue', [queueName, hash]]
-        );
-        return this.workerAdapter.executeWorkerTask(
-            'parseResult',
-            ['parseGetResult', result]
-        );
-    }
+                case 'getOneRecord':
+                    const oneRecordQuery = strategy.getOneRecord(args[0]);
+                    result = await strategy.executeQuery(pool, oneRecordQuery);
+                    result = strategy.parseGetResult(result);
+                    break;
 
-    async deleteObjectFromQueue(queueName, hash) {
-        const result = await this.workerAdapter.executeWorkerTask(
-            'executeQuery',
-            ['deleteObjectFromQueue', [queueName, hash]]
-        );
-        return this.workerAdapter.executeWorkerTask(
-            'parseResult',
-            ['parseDeleteResult', result]
-        );
-    }
+                case 'getAllRecords':
+                    const allRecordsQuery = strategy.getAllRecords(args[0]);
+                    result = await strategy.executeQuery(pool, allRecordsQuery);
+                    result = strategy.parseFilterResults(result);
+                    break;
 
-    // Key-value operations
-    async writeKey(key, value) {
-        let valueObject = {
-            type: typeof value,
-            value: value
-        };
+                case 'insertRecord':
+                    try {
+                        const timestamp = Date.now();
+                        const insertQuery = strategy.insertRecord(args[0]);
 
-        if (Buffer.isBuffer(value)) {
-            valueObject = {
-                type: "buffer",
-                value: value.toString()
+                        if (process.env.DEBUG) {
+                            console.log('Insert query:', insertQuery);
+                            console.log('Parameters:', [args[1], JSON.stringify(args[2]), timestamp]);
+                        }
+
+                        result = await strategy.executeQuery(pool, insertQuery, [args[1], JSON.stringify(args[2]), timestamp]);
+
+                        // Handle result serialization
+                        const serializedResult = {
+                            rows: result.rows.map(row => ({
+                                pk: row.pk,
+                                data: row.data,
+                                __timestamp: row.__timestamp
+                            })),
+                            rowCount: result.rowCount,
+                            command: result.command
+                        };
+
+                        result = strategy.parseInsertResult(serializedResult, args[1], args[2]);
+                    } catch (error) {
+                        // Convert postgres error into a proper Error object
+                        if (error.code === '23505') { // Unique violation
+                            throw new Error(`Record with key ${args[1]} already exists`);
+                        }
+                        throw error;
+                    }
+                    break;
+
+                case 'updateRecord':
+                    const updateTimestamp = Date.now();
+                    const updateQuery = strategy.updateRecord(args[0]);
+                    result = await strategy.executeQuery(pool, updateQuery, [args[1], JSON.stringify(args[2]), updateTimestamp]);
+                    result = strategy.parseUpdateResult(result);
+                    break;
+
+                case 'deleteRecord':
+                    const deleteQuery = strategy.deleteRecord(args[0]);
+                    result = await strategy.executeQuery(pool, deleteQuery, [args[1]]);
+                    result = strategy.parseDeleteResult(result, args[1]);
+                    break;
+
+                case 'getRecord':
+                    const getQuery = strategy.getRecord(args[0]);
+                    result = await strategy.executeQuery(pool, getQuery, [args[1]]);
+                    result = strategy.parseGetResult(result);
+                    break;
+
+                case 'filter':
+                    const [tableName, conditions, sort, max] = args;
+                    let filterConditions = '';
+                    if (conditions && conditions.length) {
+                        filterConditions = strategy.convertConditionsToLokiQuery(conditions);
+                    }
+                    const sortConfig = {
+                        field: '__timestamp',
+                        direction: (sort === 'desc' ? 'DESC' : 'ASC')
+                    };
+                    const filterQuery = strategy.filter(tableName, filterConditions, sortConfig, max);
+                    result = await strategy.executeQuery(pool, filterQuery);
+                    result = strategy.parseFilterResults(result);
+                    break;
+
+                case 'addInQueue':
+                    result = await strategy.addInQueue(args[0], args[1], args[2]);
+                    break;
+
+                case 'listQueue':
+                    const [queueName, sortAfterInsertTime, onlyFirstN] = args;
+                    const listQuery = strategy.listQueue(queueName, sortAfterInsertTime, onlyFirstN);
+                    result = await strategy.executeQuery(pool, listQuery);
+                    result = strategy.parseFilterResults(result).map(r => r.pk);
+                    break;
+
+                case 'getObjectFromQueue':
+                    const getQueueQuery = strategy.getObjectFromQueue(args[0], args[1]);
+                    result = await strategy.executeQuery(pool, getQueueQuery);
+                    result = strategy.parseQueueResult(result);
+                    break;
+
+                case 'deleteObjectFromQueue':
+                    const deleteQueueQuery = strategy.deleteObjectFromQueue(args[0], args[1]);
+                    result = await strategy.executeQuery(pool, deleteQueueQuery);
+                    result = strategy.parseQueueResult(result);
+                    break;
+
+                case 'writeKey':
+                    try {
+                        // Ensure table exists
+                        await strategy.ensureKeyValueTable(pool);
+
+                        const writeQuery = strategy.writeKey();
+                        console.log('Write key query:', writeQuery);
+
+                        result = await strategy.executeQuery(pool, writeQuery, [args[0], JSON.stringify(args[1]), Date.now()]);
+                        result = strategy.parseWriteKeyResult(result);
+                    } catch (error) {
+                        console.error('Write key error:', error);
+                        throw error;
+                    }
+                    break;
+
+                case 'readKey':
+                    try {
+                        const readQuery = strategy.readKey();
+                        console.log('Read key query:', readQuery);
+
+                        result = await strategy.executeQuery(pool, readQuery, [args[0]]);
+                        result = strategy.parseReadKeyResult(result);
+                    } catch (error) {
+                        console.error('Read key error:', error);
+                        throw error;
+                    }
+                    break;
+
+                default:
+                    throw new Error(`Unknown task: ${taskName}`);
+            }
+
+            parentPort.postMessage({success: true, result});
+        } catch (error) {
+            // Convert error to a serializable format
+            const serializedError = {
+                message: error.message,
+                stack: error.stack,
+                code: error.code,
+                constraint: error.constraint,
+                detail: error.detail,
+                // Only include these if testing db errors
+                isTestError: true,
+                type: 'DatabaseError'
             };
-        } else if (value !== null && typeof value === "object") {
-            valueObject = {
-                type: "object",
-                value: JSON.stringify(value)
-            };
+
+            parentPort.postMessage({
+                success: false,
+                error: serializedError
+            });
         }
+    });
 
-        const timestamp = Date.now();
-        const result = await this.workerAdapter.executeWorkerTask(
-            'executeQuery',
-            ['writeKey', [this.READ_WRITE_KEY_TABLE, key, JSON.stringify(valueObject), timestamp]]
-        );
-        return valueObject;
-    }
-
-    async readKey(key) {
-        const result = await this.workerAdapter.executeWorkerTask(
-            'executeQuery',
-            ['readKey', [this.READ_WRITE_KEY_TABLE, key]]
-        );
-
-        const parsedResult = await this.workerAdapter.executeWorkerTask(
-            'parseResult',
-            ['parseReadKeyResult', result]
-        );
-
-        if (!parsedResult) {
-            return null;
-        }
-
-        return typeof parsedResult === 'string' ? JSON.parse(parsedResult) : parsedResult;
-    }
+    // Signal that the worker is ready
+    parentPort.postMessage('ready');
 }
 
-module.exports = SQLAdapter;
+function serializeResult(result) {
+    if (!result) return null;
+
+    // If it's an array of results (like from a transaction)
+    if (Array.isArray(result)) {
+        return result.map(r => ({
+            rows: r.rows,
+            rowCount: r.rowCount,
+            command: r.command
+        }));
+    }
+
+    // Single result
+    return {
+        rows: result.rows,
+        rowCount: result.rowCount,
+        command: result.command
+    };
+}
