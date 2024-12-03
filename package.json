@@ -5,8 +5,7 @@
   "main": "index.js",
   "scripts": {
     "test": "mocha tests/**/*-tests.js --timeout 10000",
-    "test:adapter": "DEBUG=true mocha tests/pgsql-adapter-tests.js --timeout 10000",
-    "test:imports": "mocha tests/test-imports.js --timeout 10000"
+    "test:adapter": "DEBUG=true mocha tests/pgsql-adapter-tests.js --timeout 10000"
   },
   "dependencies": {
     "syndicate": "github:opendsu/syndicate",

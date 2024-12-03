@@ -9,15 +9,16 @@ class PostgreSQLStrategy extends BaseStrategy {
         this.READ_WRITE_KEY_TABLE = "KeyValueTable";
     }
 
+    // Database schema operations
     async ensureKeyValueTable(connection) {
-        const createTableQuery = `
+        const query = `
             CREATE TABLE IF NOT EXISTS "${this.READ_WRITE_KEY_TABLE}" (
                 pk TEXT PRIMARY KEY,
                 data JSONB,
                 __timestamp BIGINT
             );
         `;
-        await this.executeQuery(connection, createTableQuery);
+        await this.executeQuery(connection, query);
     }
 
     async ensureCollectionsTable(connection) {
@@ -35,49 +36,12 @@ class PostgreSQLStrategy extends BaseStrategy {
         }
     }
 
-    // Database schema operations
-    createCollectionsTable() {
-        return {
-            query: `
-                CREATE TABLE IF NOT EXISTS collections (
-                    name VARCHAR(255) PRIMARY KEY,
-                    indices JSONB
-                );
-            `,
-            params: []
-        };
-    }
-
-    async ensureTableExists(connection, tableName) {
-        const query = `
-        CREATE TABLE IF NOT EXISTS "${tableName}" (
-            pk TEXT PRIMARY KEY,
-            data JSONB,
-            __timestamp BIGINT
-        );
-    `;
-        await this.executeQuery(connection, query);
-    }
-
-    createKeyValueTable(tableName) {
-        return {
-            query: `
-                CREATE TABLE IF NOT EXISTS "${tableName}" (
-                    pk TEXT PRIMARY KEY,
-                    data JSONB,
-                    __timestamp BIGINT
-                );
-            `,
-            params: []
-        };
-    }
-
-    createCollection(tableName, indicesList) {
+    async createCollection(connection, tableName, indicesList) {
         if (!/^[a-zA-Z0-9_]+$/.test(tableName)) {
             throw new Error(`Invalid table name: ${tableName}`);
         }
 
-        return [
+        const queries = [
             {
                 query: `
                 CREATE TABLE IF NOT EXISTS "${tableName}" (
@@ -97,188 +61,278 @@ class PostgreSQLStrategy extends BaseStrategy {
                 params: [tableName, JSON.stringify(indicesList || [])]
             }
         ];
+
+        return await this.executeTransaction(connection, queries);
     }
 
-    createIndex(tableName, index) {
-        return `CREATE INDEX IF NOT EXISTS "${tableName}_${index}" ON "${tableName}" ((data ->>'${index}'));`;
-    }
-
-    addIndex(tableName, property) {
-        return this.createIndex(tableName, property);
-    }
-
-    removeCollection(tableName) {
-        return [
+    async removeCollection(connection, tableName) {
+        const queries = [
             {
-                query: `DROP TABLE IF EXISTS "${tableName}"`,
-                params: []
+                query: `DROP TABLE IF EXISTS "${tableName}"`
             },
             {
-                query: this.deleteFromCollection(),
+                query: `DELETE FROM collections WHERE name = $1`,
                 params: [tableName]
             }
         ];
+        return await this.executeTransaction(connection, queries);
     }
 
     async removeCollectionAsync(connection, tableName) {
-        return await this.executeTransaction(connection, this.removeCollection(tableName));
+        const queries = [
+            {
+                query: `DROP TABLE IF EXISTS "${tableName}"`
+            },
+            {
+                query: `DELETE FROM collections WHERE name = $1`,
+                params: [tableName]
+            }
+        ];
+        return await this.executeTransaction(connection, queries);
+    }
+
+    async addIndex(connection, tableName, property) {
+        const query = `CREATE INDEX IF NOT EXISTS "${tableName}_${property}" ON "${tableName}" ((data ->>'${property}'));`;
+        return await this.executeQuery(connection, query);
     }
 
     // Collection information
-    getCollections() {
-        return {
-            query: `SELECT name FROM collections WHERE name IS NOT NULL AND name != ''`,
-            params: []
-        };
+    async getCollections(connection) {
+        const query = `SELECT name FROM collections WHERE name IS NOT NULL AND name != ''`;
+        const result = await this.executeQuery(connection, query);
+        return result.rows.map(row => row.name);
     }
 
-    listCollections() {
-        return this.getCollections();
-    }
-
-    count(tableName) {
-        return `SELECT COUNT(*) as count FROM "${tableName}"`;
+    async count(connection, tableName) {
+        const query = `SELECT COUNT(*) as count FROM "${tableName}"`;
+        const result = await this.executeQuery(connection, query);
+        return parseInt(result.rows[0].count);
     }
 
     // Database state management
     async close(connection) {
-        return await this.closeConnection(connection);
-    }
-
-    async closeConnection(connection) {
         try {
             if (connection && !connection.ended) {
                 await connection.end();
             }
         } catch (error) {
-            // Ignore connection already closed errors
             if (!error.message.includes('Cannot use a pool after calling end')) {
                 throw error;
             }
         }
     }
 
-    refreshInProgress() {
-        return false; // PostgreSQL doesn't have a long-running refresh process
-    }
-
-    async refresh(connection, callback) {
-        const result = {message: "Refresh completed"};
-        if (typeof callback === 'function') {
-            callback(null, result);
-        }
-        return result;
+    async refresh(connection) {
+        return {message: "Refresh completed"};
     }
 
     async refreshAsync(connection) {
         return {message: "Refresh completed"};
     }
 
-    async saveDatabase(connection, callback) {
-        try {
-            // PostgreSQL auto-commits, so we just return a success message
-            const result = {message: "Database saved"};
-            if (typeof callback === 'function') {
-                callback(null, result);
-            }
-            return result;
-        } catch (error) {
-            if (typeof callback === 'function') {
-                callback(error);
-            }
-            throw error;
-        }
+    async saveDatabase(connection) {
+        return {message: "Database saved"};
     }
 
     // Record operations
-    insertRecord(tableName) {
-        return `
-        INSERT INTO "${tableName}" (pk, data, __timestamp)
-        VALUES ($1, $2::jsonb, $3)
-        RETURNING *
-    `;
-    }
+    async insertRecord(connection, tableName, pk, record) {
+        const query = `
+            INSERT INTO "${tableName}" (pk, data, __timestamp)
+            VALUES ($1, $2::jsonb, $3)
+            RETURNING *
+        `;
+        const timestamp = Date.now();
+        const result = await this.executeQuery(connection, query, [pk, JSON.stringify(record), timestamp]);
 
-    updateRecord(tableName) {
+        if (!result?.rows?.[0]) {
+            throw new Error('Insert operation failed to return result');
+        }
+
+        const row = result.rows[0];
         return {
-            query: `
-                UPDATE "${tableName}"
-                SET data = $2::jsonb,
-                __timestamp = $3
-                WHERE pk = $1
-                    RETURNING pk
-                    , data
-                    , __timestamp
-            `
+            ...row.data,
+            pk: row.pk,
+            __timestamp: parseInt(row.__timestamp) || timestamp
         };
     }
 
-    deleteRecord(tableName) {
+    async updateRecord(connection, tableName, pk, record) {
+        const query = `
+            UPDATE "${tableName}"
+            SET data = $2::jsonb,
+                __timestamp = $3
+            WHERE pk = $1
+                RETURNING pk
+                , data
+                , __timestamp
+        `;
+        const timestamp = Date.now();
+        const result = await this.executeQuery(connection, query, [pk, JSON.stringify(record), timestamp]);
+
+        if (!result?.rows?.[0]) return null;
+        const row = result.rows[0];
         return {
-            query: `
+            ...row.data,
+            pk: row.pk,
+            __timestamp: row.__timestamp
+        };
+    }
+
+    async deleteRecord(connection, tableName, pk) {
+        const query = `
             DELETE FROM "${tableName}"
             WHERE pk = $1
             RETURNING pk, data, __timestamp
-        `,
-            params: []  // Empty array that will be filled during execution
-        };
-    }
+        `;
+        const result = await this.executeQuery(connection, query, [pk]);
 
-    getRecord(tableName) {
+        if (!result?.rows?.[0]) return null;
         return {
-            query: `SELECT data, __timestamp FROM "${tableName}" WHERE pk = $1`,
-            params: []  // Parameters will be provided during execution
+            pk: result.rows[0].pk,
+            data: result.rows[0].data,
+            __timestamp: result.rows[0].__timestamp
         };
     }
 
-    getOneRecord(tableName) {
-        return {
-            query: `SELECT data, __timestamp FROM "${tableName}" LIMIT 1`
-        };
+    async getRecord(connection, tableName, pk) {
+        const query = `SELECT data, __timestamp FROM "${tableName}" WHERE pk = $1`;
+        const result = await this.executeQuery(connection, query, [pk]);
+
+        if (!result?.rows?.[0]) return null;
+        return result.rows[0].data;
     }
 
-    getAllRecords(tableName) {
-        return {
-            query: `SELECT pk, data, __timestamp FROM "${tableName}"`
-        };
+    async getOneRecord(connection, tableName) {
+        const query = `SELECT data, __timestamp FROM "${tableName}" LIMIT 1`;
+        const result = await this.executeQuery(connection, query);
+
+        if (!result?.rows?.[0]) return null;
+        return result.rows[0].data;
     }
 
-    filter(tableName, conditions, sort = {}, max = null) {
-        try {
-            let query = `
+    async getAllRecords(connection, tableName) {
+        const query = `SELECT pk, data, __timestamp FROM "${tableName}"`;
+        const result = await this.executeQuery(connection, query);
+
+        return result.rows.map(row => ({
+            ...row.data,
+            pk: row.pk,
+            __timestamp: row.__timestamp
+        }));
+    }
+
+    async filter(connection, tableName, conditions = [], sort = 'asc', max = null) {
+        let query = `
             SELECT pk, data, __timestamp 
-            FROM "${tableName}"`;
+            FROM "${tableName}"
+        `;
 
-            // Convert the conditions to PostgreSQL syntax
-            if (conditions && conditions.length > 0) {
-                const whereClause = this.convertConditionsToLokiQuery(conditions);
-                if (whereClause) {
-                    query += ` WHERE ${whereClause}`;
-                }
+        if (conditions && conditions.length > 0) {
+            const whereClause = this._convertConditionsToLokiQuery(conditions);
+            if (whereClause) {
+                query += ` WHERE ${whereClause}`;
             }
-
-            // Handle sorting
-            const sortField = sort.field || '__timestamp';
-            const direction = (sort.direction || 'ASC').toUpperCase();
-            query += ` ORDER BY ${sortField === '__timestamp' ? '__timestamp' : `(data->>'${sortField}')`} ${direction}`;
-
-            // Handle limit
-            if (max) {
-                query += ` LIMIT ${max}`;
-            }
-
-            if (process.env.DEBUG) {
-                console.log('Generated filter query:', query);
-                console.log('With conditions:', conditions);
-            }
-
-            return query;
-        } catch (err) {
-            throw new Error(`Error building filter query: ${err.message}`);
         }
+
+        query += ` ORDER BY __timestamp ${sort.toUpperCase()}`;
+
+        if (max) {
+            query += ` LIMIT ${max}`;
+        }
+
+        const result = await this.executeQuery(connection, query);
+
+        return result.rows.map(row => ({
+            ...row.data,
+            pk: row.pk,
+            __timestamp: row.__timestamp
+        }));
     }
 
-    convertConditionsToLokiQuery(conditions) {
+    // Queue operations
+    async addInQueue(connection, queueName, object, ensureUniqueness = false) {
+        const hash = crypto.createHash('sha256').update(JSON.stringify(object)).digest('hex');
+        let pk = hash;
+
+        if (ensureUniqueness) {
+            const random = crypto.randomBytes(5).toString('base64');
+            pk = `${hash}_${Date.now()}_${random}`;
+        }
+
+        const query = `
+            INSERT INTO "${queueName}" (pk, data, __timestamp)
+            VALUES ($1, $2::jsonb, $3)
+            RETURNING *
+        `;
+
+        await this.executeQuery(connection, query, [pk, JSON.stringify(object), Date.now()]);
+        return pk;
+    }
+
+    async queueSize(connection, queueName) {
+        const query = `SELECT COUNT(*)::int as count FROM "${queueName}"`;
+        const result = await this.executeQuery(connection, query);
+        return parseInt(result.rows[0].count, 10) || 0;
+    }
+
+    async listQueue(connection, queueName, sortAfterInsertTime = 'asc', onlyFirstN = null) {
+        const query = `
+            SELECT pk, data, __timestamp
+            FROM "${queueName}"
+            ORDER BY __timestamp ${sortAfterInsertTime.toUpperCase()}
+            ${onlyFirstN ? `LIMIT ${onlyFirstN}` : ''}
+        `;
+
+        const result = await this.executeQuery(connection, query);
+        return result.rows.map(row => row.pk);
+    }
+
+    async getObjectFromQueue(connection, queueName, hash) {
+        const query = `SELECT data, __timestamp FROM "${queueName}" WHERE pk = $1`;
+        const result = await this.executeQuery(connection, query, [hash]);
+
+        if (!result?.rows?.[0]) return null;
+        return result.rows[0].data;
+    }
+
+    async deleteObjectFromQueue(connection, queueName, hash) {
+        const query = `
+            DELETE FROM "${queueName}"
+            WHERE pk = $1
+            RETURNING pk, data, __timestamp
+        `;
+
+        const result = await this.executeQuery(connection, query, [hash]);
+        if (!result?.rows?.[0]) return null;
+        return result.rows[0].data;
+    }
+
+    // Key-value operations
+    async writeKey(connection, key, value) {
+        const query = `
+            INSERT INTO "${this.READ_WRITE_KEY_TABLE}" (pk, data, __timestamp)
+            VALUES ($1, $2::jsonb, $3)
+            ON CONFLICT (pk) DO UPDATE 
+            SET data = $2::jsonb, 
+                __timestamp = $3
+            RETURNING data;
+        `;
+
+        const result = await this.executeQuery(connection, query, [key, value, Date.now()]);
+        if (!result?.rows?.[0]?.data) return null;
+        return result.rows[0].data;
+    }
+
+    async readKey(connection, key) {
+        const query = `SELECT data, __timestamp FROM "${this.READ_WRITE_KEY_TABLE}" WHERE pk = $1`;
+        const result = await this.executeQuery(connection, query, [key]);
+
+        if (!result?.rows?.[0]?.data) return null;
+        return result.rows[0].data;
+    }
+
+    // Helper methods
+    _convertConditionsToLokiQuery(conditions) {
         if (!conditions || !Array.isArray(conditions) || conditions.length === 0) {
             return '';
         }
@@ -295,260 +349,12 @@ class PostgreSQLStrategy extends BaseStrategy {
                 }
 
                 const [field, operator, value] = parts;
-                // Ensure numeric comparison for score field
                 return `(data->>'${field}')::numeric ${operator} ${value}`;
             });
 
             return andConditions.join(' AND ');
         } catch (err) {
             throw new Error(`Error processing filter conditions: ${err.message}`);
-        }
-    }
-
-    __getSortingField(filterConditions) {
-        if (filterConditions && filterConditions.length) {
-            const splitCondition = filterConditions[0].split(" ");
-            return splitCondition[0];
-        }
-        return '__timestamp';
-    }
-
-    formatFilterCondition(field, operator, value) {
-        return `(data->>'${field}')::numeric ${operator} ${value}`;
-    }
-
-    // Queue operations
-    async addInQueue(connection, queueName, object, ensureUniqueness = false) {
-        const hash = crypto.createHash('sha256').update(JSON.stringify(object)).digest('hex');
-        let pk = hash;
-
-        if (ensureUniqueness) {
-            const random = crypto.randomBytes(5).toString('base64');
-            pk = `${hash}_${Date.now()}_${random}`;
-        }
-
-        const params = [pk, JSON.stringify(object), Date.now()];
-        const result = await this.executeQuery(connection, this.insertRecord(queueName), params);
-        return pk;
-    }
-
-    queueSize(queueName) {
-        return {
-            query: `SELECT COUNT(*)::int as count FROM "${queueName}"`
-        };
-    }
-
-    listQueue(queueName, sortAfterInsertTime = 'asc', onlyFirstN) {
-        return {
-            query: `
-            SELECT pk, data, __timestamp
-            FROM "${queueName}"
-            ORDER BY __timestamp ${sortAfterInsertTime.toUpperCase()}
-            ${onlyFirstN ? `LIMIT ${onlyFirstN}` : ''}
-        `
-        };
-    }
-
-    getObjectFromQueue(queueName, hash) {
-        return {
-            query: `SELECT data, __timestamp FROM "${queueName}" WHERE pk = $1`,
-            params: [hash]
-        };
-    }
-
-    deleteObjectFromQueue(queueName, hash) {
-        return {
-            query: `
-            DELETE FROM "${queueName}"
-            WHERE pk = $1
-            RETURNING pk, data, __timestamp
-        `,
-            params: [hash]
-        };
-    }
-
-    // Key-value operations
-    writeKey(tableName) {
-        return {
-            query: `
-            INSERT INTO "${this.READ_WRITE_KEY_TABLE}" (pk, data, __timestamp)
-            VALUES ($1, $2::jsonb, $3)
-            ON CONFLICT (pk) DO UPDATE 
-            SET data = $2::jsonb, 
-                __timestamp = $3
-            RETURNING data;
-            `,
-            params: []
-        };
-    }
-
-    readKey(tableName) {
-        return {
-            query: `SELECT data, __timestamp FROM "${this.READ_WRITE_KEY_TABLE}" WHERE pk = $1`,
-            params: []
-        };
-    }
-
-    // Storage reference
-    get storageDB() {
-        return this._storageDB;
-    }
-
-    set storageDB(value) {
-        this._storageDB = value;
-    }
-
-    // Collection maintenance
-    insertCollection() {
-        return {
-            query: `
-            INSERT INTO collections (name, indices)
-            VALUES ($1, $2)
-            ON CONFLICT (name) DO UPDATE
-            SET indices = $2
-        `,
-            params: []  // Parameters will be added when executing
-        };
-    }
-
-    deleteFromCollection() {
-        return 'DELETE FROM collections WHERE name = $1';
-    }
-
-    // Result parsing methods
-    parseCountResult(result) {
-        return parseInt(result.rows[0].count);
-    }
-
-    parseCollectionsResult(result) {
-        try {
-            if (!result?.rows) {
-                console.log('No rows in collection result:', result);
-                return [];
-            }
-            return result.rows.map(row => row.name || '').filter(Boolean);
-        } catch (e) {
-            console.error('Error parsing collections:', e);
-            return [];
-        }
-    }
-
-    parseInsertResult(result, pk, record) {
-        if (!result?.rows?.[0]) {
-            console.error('Insert result:', result);
-            throw new Error('Insert operation failed to return result');
-        }
-
-        const row = result.rows[0];
-
-        // Ensure data is properly parsed
-        let parsedData = row.data;
-        if (typeof parsedData === 'string') {
-            try {
-                parsedData = JSON.parse(parsedData);
-            } catch (e) {
-                console.error('Error parsing data:', e);
-                parsedData = record; // Fallback to original record
-            }
-        }
-
-        return {
-            ...parsedData,
-            pk: row.pk || pk,
-            __timestamp: parseInt(row.__timestamp) || Date.now()
-        };
-    }
-
-    parseUpdateResult(result) {
-        if (!result?.rows?.[0]) return null;
-        const row = result.rows[0];
-        try {
-            const data = typeof row.data === 'string' ? JSON.parse(row.data) : row.data;
-            return {
-                ...data,
-                pk: row.pk,
-                __timestamp: row.__timestamp
-            };
-        } catch (e) {
-            console.error('Error parsing update result:', e);
-            return null;
-        }
-    }
-
-    parseDeleteResult(result) {
-        if (!result || !result.rows || result.rows.length === 0) return null;
-        return {
-            pk: result.rows[0].pk,
-            data: result.rows[0].data,
-            __timestamp: result.rows[0].__timestamp
-        };
-    }
-
-    parseGetResult(result) {
-        if (!result?.rows?.[0]) return null;
-        try {
-            return result.rows[0].data;
-        } catch (e) {
-            console.error('Error parsing get result:', e);
-            return null;
-        }
-    }
-
-    parseFilterResults(result) {
-        if (!result?.rows) return [];
-        return result.rows.map(row => {
-            try {
-                const data = typeof row.data === 'string' ? JSON.parse(row.data) : row.data;
-                return {
-                    ...data,
-                    pk: row.pk,
-                    __timestamp: row.__timestamp
-                };
-            } catch (e) {
-                console.error('Error parsing filter row:', e);
-                return null;
-            }
-        }).filter(Boolean);
-    }
-
-
-    parseWriteKeyResult(result) {
-        try {
-            if (!result?.rows?.[0]?.data) return null;
-            return result.rows[0].data;
-        } catch (e) {
-            console.error('Error parsing write key result:', e);
-            return null;
-        }
-    }
-
-    parseReadKeyResult(result) {
-        try {
-            if (!result?.rows?.[0]?.data) return null;
-            return result.rows[0].data;
-        } catch (e) {
-            console.error('Error parsing read key result:', e);
-            return null;
-        }
-    }
-
-    parseQueueResult(result) {
-        if (!result?.rows?.[0]) return null;
-        try {
-            return result.rows[0].data;
-        } catch (e) {
-            console.error('Error parsing queue result:', e);
-            return null;
-        }
-    }
-
-    parseQueueSizeResult(result) {
-        try {
-            if (!result?.rows?.[0]) return 0;
-            return parseInt(result.rows[0].count, 10) || 0;
-        } catch (e) {
-            console.error('Error parsing queue size:', e);
-            return 0;
         }
     }
 
@@ -578,10 +384,7 @@ class PostgreSQLStrategy extends BaseStrategy {
                 throw new Error('Query string is required');
             }
 
-            // Execute the query using the pool directly
             const result = await connection.query(queryText, queryParams);
-
-            // Clean the result before returning
             return JSON.parse(JSON.stringify(result));
         } catch (error) {
             const serializableError = new Error(error.message);
@@ -594,71 +397,50 @@ class PostgreSQLStrategy extends BaseStrategy {
     async executeTransaction(connection, queries) {
         if (process.env.DEBUG) {
             console.log('=== Execute Transaction Debug ===');
-            console.log('Connection:', connection ? 'exists' : 'null');
-            console.log('Connection type:', connection ? Object.getPrototypeOf(connection).constructor.name : 'N/A');
-            console.log('Connection methods:', connection ? Object.getOwnPropertyNames(Object.getPrototypeOf(connection)) : 'N/A');
             console.log('Queries:', queries);
             console.log('==============================');
         }
 
+        const client = await connection.connect();
+
         try {
-            // For PostgreSQL Pool, we need to acquire a client first
-            const client = await connection.connect();
+            await client.query('BEGIN');
+            const results = [];
 
-            if (process.env.DEBUG) {
-                console.log('Client acquired:', client ? 'yes' : 'no');
-                console.log('Client type:', client ? Object.getPrototypeOf(client).constructor.name : 'N/A');
-            }
+            for (const queryData of queries) {
+                let queryText = '';
+                let params = [];
 
-            try {
-                await client.query('BEGIN');
-                const results = [];
-
-                for (const queryData of queries) {
-                    if (process.env.DEBUG) {
-                        console.log('Processing query:', queryData);
-                    }
-
-                    let queryText = '';
-                    let params = [];
-
-                    if (typeof queryData === 'string') {
-                        queryText = queryData;
-                    } else if (queryData && typeof queryData === 'object') {
-                        queryText = queryData.query;
-                        params = queryData.params || [];
-                    } else {
-                        throw new Error('Invalid query format');
-                    }
-
-                    if (!queryText) {
-                        throw new Error('Query string is required');
-                    }
-
-                    if (process.env.DEBUG) {
-                        console.log('Executing transaction query:', queryText);
-                        console.log('With params:', params);
-                    }
-
-                    const result = await client.query(queryText, params);
-                    results.push(result);
+                if (typeof queryData === 'string') {
+                    queryText = queryData;
+                } else if (queryData && typeof queryData === 'object') {
+                    queryText = queryData.query;
+                    params = queryData.params || [];
+                } else {
+                    throw new Error('Invalid query format');
                 }
 
-                await client.query('COMMIT');
-                return results;
-            } catch (err) {
-                console.error('Transaction error:', err);
-                await client.query('ROLLBACK');
-                throw err;
-            } finally {
+                if (!queryText) {
+                    throw new Error('Query string is required');
+                }
+
                 if (process.env.DEBUG) {
-                    console.log('Releasing client');
+                    console.log('Executing transaction query:', queryText);
+                    console.log('With params:', params);
                 }
-                client.release();
+
+                const result = await client.query(queryText, params);
+                results.push(result);
             }
+
+            await client.query('COMMIT');
+            return results;
         } catch (err) {
-            console.error('Transaction setup error:', err);
+            console.error('Transaction error:', err);
+            await client.query('ROLLBACK');
             throw err;
+        } finally {
+            client.release();
         }
     }
 }
