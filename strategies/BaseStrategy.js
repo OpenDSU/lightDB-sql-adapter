@@ -1,5 +1,21 @@
 // strategies/BaseStrategy.js
 class BaseStrategy {
+    constructor() {
+        this._storageDB = null;
+        this.READ_WRITE_KEY_TABLE = "KeyValueTable";
+
+        // Initialize OpenDSU dependencies
+        this.openDSU = require("opendsu");
+        this.keySSISpace = this.openDSU.loadAPI("keyssi");
+        this.w3cDID = this.openDSU.loadAPI("w3cdid");
+        this.CryptoSkills = this.w3cDID.CryptographicSkills;
+
+        // Define constant table names
+        this.KEY_SSIS_TABLE = "keyssis";
+        this.SEED_SSIS_TABLE = "seedssis";
+        this.DIDS_PRIVATE_KEYS = "dids_private";
+    }
+
     // Database schema operations
     async createCollection(connection, tableName, indicesList) {
         throw new Error('Not implemented');
@@ -136,21 +152,190 @@ class BaseStrategy {
         throw new Error('Not implemented');
     }
 
-    /*
-    // KeySSI operations - To be implemented later
-    getCapableOfSigningKeySSI(keySSI, callback) { throw new Error('Not implemented'); }
-    storeSeedSSI(seedSSI, alias, callback) { throw new Error('Not implemented'); }
-    signForKeySSI(keySSI, hash, callback) { throw new Error('Not implemented'); }
 
-    // DID operations - To be implemented later
-    getPrivateInfoForDID(did, callback) { throw new Error('Not implemented'); }
-    __ensureAreDIDDocumentsThenExecute(did, fn, callback) { throw new Error('Not implemented'); }
-    storeDID(storedDID, privateKeys, callback) { throw new Error('Not implemented'); }
-    signForDID(didThatIsSigning, hash, callback) { throw new Error('Not implemented'); }
-    verifyForDID(didThatIsVerifying, hash, signature, callback) { throw new Error('Not implemented'); }
-    encryptMessage(didFrom, didTo, message, callback) { throw new Error('Not implemented'); }
-    decryptMessage(didTo, encryptedMessage, callback) { throw new Error('Not implemented'); }
-    */
+    //------------------ KeySSIs -----------------
+    async getCapableOfSigningKeySSI(connection, keySSI) {
+        if (typeof keySSI === "undefined") {
+            throw new Error(`A SeedSSI should be specified.`);
+        }
+
+        if (typeof keySSI === "string") {
+            try {
+                keySSI = this.keySSISpace.parse(keySSI);
+            } catch (e) {
+                throw new Error(`Failed to parse keySSI ${keySSI}`);
+            }
+        }
+
+        const record = await this.getRecord(connection, this.KEY_SSIS_TABLE, keySSI.getIdentifier());
+        if (!record) {
+            throw new Error(`No capable of signing keySSI found for keySSI ${keySSI.getIdentifier()}`);
+        }
+
+        let capableOfSigningKeySSI;
+        try {
+            capableOfSigningKeySSI = this.keySSISpace.parse(record.capableOfSigningKeySSI);
+        } catch (e) {
+            throw new Error(`Failed to parse keySSI ${record.capableOfSigningKeySSI}`);
+        }
+
+        return capableOfSigningKeySSI;
+    }
+
+    async storeSeedSSI(connection, seedSSI, alias) {
+        if (typeof seedSSI === "string") {
+            try {
+                seedSSI = this.keySSISpace.parse(seedSSI);
+            } catch (e) {
+                throw new Error(`Failed to parse keySSI ${seedSSI}`);
+            }
+        }
+
+        const keySSIIdentifier = seedSSI.getIdentifier();
+
+        const registerDerivedKeySSIs = async (derivedKeySSI) => {
+            await this.insertRecord(connection, this.KEY_SSIS_TABLE, derivedKeySSI.getIdentifier(), {
+                capableOfSigningKeySSI: keySSIIdentifier
+            });
+
+            try {
+                derivedKeySSI = derivedKeySSI.derive();
+            } catch (e) {
+                return;
+            }
+
+            await registerDerivedKeySSIs(derivedKeySSI);
+        };
+
+        await this.insertRecord(connection, this.SEED_SSIS_TABLE, alias, {
+            seedSSI: keySSIIdentifier
+        });
+
+        await registerDerivedKeySSIs(seedSSI);
+    }
+
+    async signForKeySSI(connection, keySSI, hash) {
+        const capableOfSigningKeySSI = await this.getCapableOfSigningKeySSI(connection, keySSI);
+        if (typeof capableOfSigningKeySSI === "undefined") {
+            throw new Error(`The provided SSI does not grant writing rights`);
+        }
+
+        return await capableOfSigningKeySSI.sign(hash);
+    }
+
+    //------------------ DIDs -----------------
+    async getPrivateInfoForDID(connection, did) {
+        const record = await this.getRecord(connection, this.DIDS_PRIVATE_KEYS, did);
+        if (!record) {
+            throw new Error(`Failed to get private info for did ${did}`);
+        }
+
+        return record.privateKeys.map(privateKey => {
+            if (privateKey) {
+                return Buffer.from(privateKey);
+            }
+            return privateKey;
+        });
+    }
+
+    async __ensureAreDIDDocumentsThenExecute(did, fn) {
+        if (typeof did === "string") {
+            const didDocument = await this.w3cDID.resolveDID(did);
+            return await fn(didDocument);
+        }
+        return await fn(did);
+    }
+
+    async storeDID(connection, storedDID, privateKeys) {
+        const record = await this.getRecord(connection, this.DIDS_PRIVATE_KEYS, storedDID);
+        if (!record) {
+            return await this.insertRecord(connection, this.DIDS_PRIVATE_KEYS, storedDID, {
+                privateKeys: privateKeys
+            });
+        }
+
+        privateKeys.forEach(privateKey => {
+            record.privateKeys.push(privateKey);
+        });
+
+        return await this.updateRecord(connection, this.DIDS_PRIVATE_KEYS, storedDID, record);
+    }
+
+    async signForDID(connection, didThatIsSigning, hash) {
+        const signForDID = async (didDoc) => {
+            const privateKeys = await this.getPrivateInfoForDID(connection, didDoc.getIdentifier());
+            try {
+                return this.CryptoSkills.applySkill(
+                    didDoc.getMethodName(),
+                    this.CryptoSkills.NAMES.SIGN,
+                    hash,
+                    privateKeys[privateKeys.length - 1]
+                );
+            } catch (err) {
+                throw err;
+            }
+        };
+
+        return await this.__ensureAreDIDDocumentsThenExecute(didThatIsSigning, signForDID);
+    }
+
+    async verifyForDID(connection, didThatIsVerifying, hash, signature) {
+        const verifyForDID = async (didDoc) => {
+            try {
+                const publicKey = await didDoc.getPublicKey("pem");
+                return this.CryptoSkills.applySkill(
+                    didDoc.getMethodName(),
+                    this.CryptoSkills.NAMES.VERIFY,
+                    hash,
+                    publicKey,
+                    Buffer.from(signature)
+                );
+            } catch (err) {
+                throw err;
+            }
+        };
+
+        return await this.__ensureAreDIDDocumentsThenExecute(didThatIsVerifying, verifyForDID);
+    }
+
+    async encryptMessage(connection, didFrom, didTo, message) {
+        const encryptMessage = async () => {
+            const privateKeys = await this.getPrivateInfoForDID(connection, didFrom.getIdentifier());
+            return await this.CryptoSkills.applySkill(
+                didFrom.getMethodName(),
+                this.CryptoSkills.NAMES.ENCRYPT_MESSAGE,
+                privateKeys,
+                didFrom,
+                didTo,
+                message
+            );
+        };
+
+        if (typeof didFrom === "string") {
+            didFrom = await this.w3cDID.resolveDID(didFrom);
+
+            if (typeof didTo === "string") {
+                didTo = await this.w3cDID.resolveDID(didTo);
+            }
+        }
+
+        return await encryptMessage();
+    }
+
+    async decryptMessage(connection, didTo, encryptedMessage) {
+        const decryptMessage = async (didDoc) => {
+            const privateKeys = await this.getPrivateInfoForDID(connection, didDoc.getIdentifier());
+            return await this.CryptoSkills.applySkill(
+                didDoc.getMethodName(),
+                this.CryptoSkills.NAMES.DECRYPT_MESSAGE,
+                privateKeys,
+                didDoc,
+                encryptedMessage
+            );
+        };
+
+        return await this.__ensureAreDIDDocumentsThenExecute(didTo, decryptMessage);
+    }
 }
 
 module.exports = BaseStrategy;
