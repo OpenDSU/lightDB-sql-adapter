@@ -12,14 +12,16 @@ if (!isMainThread) {
 
     async function initializePool(config, type) {
         if (!pool) {
+            console.log('DEBUG: Initializing pool with type:', type);
             pool = await ConnectionRegistry.createConnection(type, config);
             strategy = StrategyFactory.createStrategy(type);
-            await strategy.ensureCollectionsTable(pool);
+            console.log('DEBUG: Strategy created:', strategy.constructor.name);
         }
         return pool;
     }
 
     parentPort.on("message", async (taskData) => {
+        console.log('DEBUG: Received task:', taskData);
         const {taskName, args} = taskData;
         let result = null;
         let error = null;
@@ -29,7 +31,12 @@ if (!isMainThread) {
                 await initializePool(taskData.workerData.config, taskData.workerData.type);
             }
 
-            // Call the strategy method directly
+            console.log('DEBUG: Executing strategy method:', taskName, 'with args:', args);
+            // Verify the strategy has the method
+            if (typeof strategy[taskName] !== 'function') {
+                throw new Error(`Method ${taskName} not implemented`);
+            }
+
             result = await strategy[taskName](pool, ...args);
             result = JSON.parse(JSON.stringify(result));
 
@@ -38,6 +45,7 @@ if (!isMainThread) {
                 result
             });
         } catch (err) {
+            console.error('DEBUG: Error executing task:', err);
             error = {
                 message: err.message,
                 code: err.code,

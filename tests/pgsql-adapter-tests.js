@@ -59,22 +59,6 @@ describe('PostgreSQL Adapter Tests', () => {
     describe('Collection Management', () => {
         it('should create a new collection', function (done) {
             this.timeout(10000);
-            db.createCollection('test_collection', ['field1', 'field2'], (err) => {
-                if (err) return done(err);
-                db.getCollections((err, collections) => {
-                    if (err) return done(err);
-                    try {
-                        assert(collections.includes('test_collection'));
-                        done();
-                    } catch (e) {
-                        done(e);
-                    }
-                });
-            });
-        });
-
-        it('should handle collection creation with no indices', function (done) {
-            this.timeout(10000);
             db.createCollection('test_collection', [], (err) => {
                 if (err) return done(err);
                 db.getCollections((err, collections) => {
@@ -211,13 +195,15 @@ describe('PostgreSQL Adapter Tests', () => {
     describe('Filter Operations', () => {
         beforeEach(function (done) {
             this.timeout(10000);
-            db.createCollection('test_filters', ['score'], (err) => {
+            db.createCollection('test_filters', [], (err) => {
                 if (err) return done(err);
 
+                // Insert test records with various data types
                 const records = [
-                    {score: 10, name: 'Alice'},
-                    {score: 20, name: 'Bob'},
-                    {score: 30, name: 'Charlie'}
+                    {name: 'Alice', score: 10, active: true, tags: ['user', 'admin']},
+                    {name: 'Bob', score: 20, active: false, tags: ['user']},
+                    {name: 'Charlie', score: 30, active: true, tags: ['guest']},
+                    {name: 'David', score: null, active: null, description: 'test user'},
                 ];
 
                 let completed = 0;
@@ -233,13 +219,79 @@ describe('PostgreSQL Adapter Tests', () => {
             });
         });
 
-        it('should filter records with conditions', function (done) {
-            this.timeout(10000);
-            db.filter('test_filters', ['score >= 20'], 'asc', null, (err, results) => {
+        it('should filter numeric values', function (done) {
+            db.filter('test_filters', ['score > 15'], 'asc', null, (err, results) => {
                 if (err) return done(err);
                 try {
                     assert.strictEqual(results.length, 2);
-                    assert(results.every(r => r.score >= 20));
+                    assert(results.every(r => r.score > 15));
+                    done();
+                } catch (e) {
+                    done(e);
+                }
+            });
+        });
+
+        it('should filter string values', function (done) {
+            db.filter('test_filters', ["name = 'Alice'"], 'asc', null, (err, results) => {
+                if (err) return done(err);
+                try {
+                    assert.strictEqual(results.length, 1);
+                    assert.strictEqual(results[0].name, 'Alice');
+                    done();
+                } catch (e) {
+                    done(e);
+                }
+            });
+        });
+
+        it('should handle LIKE operator case-insensitively', function (done) {
+            db.filter('test_filters', ["name LIKE '%LIC%'"], 'asc', null, (err, results) => {
+                if (err) return done(err);
+                try {
+                    assert.strictEqual(results.length, 1);
+                    assert.strictEqual(results[0].name, 'Alice');
+                    done();
+                } catch (e) {
+                    done(e);
+                }
+            });
+        });
+
+        it('should filter boolean values', function (done) {
+            db.filter('test_filters', ["active = true"], 'asc', null, (err, results) => {
+                if (err) return done(err);
+                try {
+                    assert.strictEqual(results.length, 2);
+                    assert(results.every(r => r.active === true));
+                    done();
+                } catch (e) {
+                    done(e);
+                }
+            });
+        });
+
+        it('should handle NULL values', function (done) {
+            db.filter('test_filters', ["score IS NULL"], 'asc', null, (err, results) => {
+                if (err) return done(err);
+                try {
+                    assert.strictEqual(results.length, 1);
+                    assert.strictEqual(results[0].name, 'David');
+                    done();
+                } catch (e) {
+                    done(e);
+                }
+            });
+        });
+
+        it('should handle multiple conditions', function (done) {
+            db.filter('test_filters', ['score > 15', "active = false"], 'asc', null, (err, results) => {
+                if (err) return done(err);
+                try {
+                    assert.strictEqual(results.length, 1);
+                    assert.strictEqual(results[0].name, 'Bob');
+                    assert.strictEqual(results[0].score, 20);
+                    assert.strictEqual(results[0].active, false);
                     done();
                 } catch (e) {
                     done(e);
@@ -248,14 +300,15 @@ describe('PostgreSQL Adapter Tests', () => {
         });
 
         it('should sort filtered results', function (done) {
-            this.timeout(10000);
-            db.filter('test_filters', [], 'desc', null, (err, results) => {
+            db.filter('test_filters', ['score > 0'], 'desc', null, (err, results) => {
                 if (err) return done(err);
                 try {
                     assert.strictEqual(results.length, 3);
-                    for (let i = 1; i < results.length; i++) {
-                        assert(results[i - 1].__timestamp >= results[i].__timestamp);
-                    }
+                    const scores = results.map(r => r.score);
+                    assert(scores.every((score, index) =>
+                            index === 0 || score <= scores[index - 1]),
+                        'Results should be sorted by score in descending order'
+                    );
                     done();
                 } catch (e) {
                     done(e);
@@ -264,8 +317,7 @@ describe('PostgreSQL Adapter Tests', () => {
         });
 
         it('should limit filtered results', function (done) {
-            this.timeout(10000);
-            db.filter('test_filters', [], 'asc', 2, (err, results) => {
+            db.filter('test_filters', ['score > 0'], 'asc', 2, (err, results) => {
                 if (err) return done(err);
                 try {
                     assert.strictEqual(results.length, 2);
@@ -276,13 +328,11 @@ describe('PostgreSQL Adapter Tests', () => {
             });
         });
 
-        it('should handle complex filter conditions', function (done) {
-            this.timeout(10000);
-            db.filter('test_filters', ['score >= 10', 'score <= 20'], 'asc', null, (err, results) => {
-                if (err) return done(err);
+        it('should handle invalid filter conditions gracefully', function (done) {
+            db.filter('test_filters', ['invalid condition'], 'asc', null, (err) => {
                 try {
-                    assert.strictEqual(results.length, 2);
-                    assert(results.every(r => r.score >= 10 && r.score <= 20));
+                    assert(err instanceof Error);
+                    assert(err.message.includes('Invalid condition structure'));
                     done();
                 } catch (e) {
                     done(e);

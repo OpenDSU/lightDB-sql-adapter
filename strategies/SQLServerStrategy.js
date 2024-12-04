@@ -181,7 +181,7 @@ class SQLServerStrategy extends BaseStrategy {
         `;
     }
 
-    convertConditionsToLokiQuery(conditions) {
+    convertToSQLQuery(conditions) {
         if (!conditions || conditions.length === 0) {
             return {};
         }

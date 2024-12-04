@@ -21,74 +21,30 @@ class PostgreSQLStrategy extends BaseStrategy {
         await this.executeQuery(connection, query);
     }
 
-    async ensureCollectionsTable(connection) {
-        const query = `
-        CREATE TABLE IF NOT EXISTS collections (
-            name VARCHAR(255) PRIMARY KEY,
-            indices JSONB
-        );
-    `;
-        try {
-            await this.executeQuery(connection, query);
-        } catch (error) {
-            console.error('Error creating collections table:', error);
-            throw error;
-        }
-    }
-
     async createCollection(connection, tableName, indicesList) {
         if (!/^[a-zA-Z0-9_]+$/.test(tableName)) {
             throw new Error(`Invalid table name: ${tableName}`);
         }
 
-        const queries = [
-            {
-                query: `
-                CREATE TABLE IF NOT EXISTS "${tableName}" (
-                    pk TEXT PRIMARY KEY,
-                    data JSONB,
-                    __timestamp BIGINT
-                );
-            `
-            },
-            {
-                query: `
-                INSERT INTO collections (name, indices)
-                VALUES ($1, $2)
-                ON CONFLICT (name) DO UPDATE
-                SET indices = $2;
-            `,
-                params: [tableName, JSON.stringify(indicesList || [])]
-            }
-        ];
+        const query = `
+        CREATE TABLE IF NOT EXISTS "${tableName}" (
+            pk TEXT PRIMARY KEY,
+            data JSONB,
+            __timestamp BIGINT
+        );
+    `;
 
-        return await this.executeTransaction(connection, queries);
+        return await this.executeQuery(connection, query);
     }
 
     async removeCollection(connection, tableName) {
-        const queries = [
-            {
-                query: `DROP TABLE IF EXISTS "${tableName}"`
-            },
-            {
-                query: `DELETE FROM collections WHERE name = $1`,
-                params: [tableName]
-            }
-        ];
-        return await this.executeTransaction(connection, queries);
+        const query = `DROP TABLE IF EXISTS "${tableName}"`;
+        return await this.executeQuery(connection, query);
     }
 
     async removeCollectionAsync(connection, tableName) {
-        const queries = [
-            {
-                query: `DROP TABLE IF EXISTS "${tableName}"`
-            },
-            {
-                query: `DELETE FROM collections WHERE name = $1`,
-                params: [tableName]
-            }
-        ];
-        return await this.executeTransaction(connection, queries);
+        const query = `DROP TABLE IF EXISTS "${tableName}"`;
+        return await this.executeQuery(connection, query);
     }
 
     async addIndex(connection, tableName, property) {
@@ -98,7 +54,13 @@ class PostgreSQLStrategy extends BaseStrategy {
 
     // Collection information
     async getCollections(connection) {
-        const query = `SELECT name FROM collections WHERE name IS NOT NULL AND name != ''`;
+        const query = `
+        SELECT table_name as name 
+        FROM information_schema.tables 
+        WHERE table_schema = 'public' 
+        AND table_type = 'BASE TABLE'
+        AND table_name != 'KeyValueTable'
+    `;
         const result = await this.executeQuery(connection, query);
         return result.rows.map(row => row.name);
     }
@@ -228,7 +190,7 @@ class PostgreSQLStrategy extends BaseStrategy {
         `;
 
         if (conditions && conditions.length > 0) {
-            const whereClause = this._convertConditionsToLokiQuery(conditions);
+            const whereClause = this._convertToSQLQuery(conditions);
             if (whereClause) {
                 query += ` WHERE ${whereClause}`;
             }
@@ -332,7 +294,7 @@ class PostgreSQLStrategy extends BaseStrategy {
     }
 
     // Helper methods
-    _convertConditionsToLokiQuery(conditions) {
+    _convertToSQLQuery(conditions) {
         if (!conditions || !Array.isArray(conditions) || conditions.length === 0) {
             return '';
         }
@@ -349,7 +311,30 @@ class PostgreSQLStrategy extends BaseStrategy {
                 }
 
                 const [field, operator, value] = parts;
-                return `(data->>'${field}')::numeric ${operator} ${value}`;
+
+                // Handle IS NULL and IS NOT NULL
+                if (value.toLowerCase() === 'null') {
+                    return `data->>'${field}' IS NULL`;
+                }
+
+                // Handle LIKE/ILIKE operator
+                if (operator.toLowerCase() === 'like') {
+                    return `data->>'${field}' ILIKE ${value}`;
+                }
+
+                // Handle numeric comparisons
+                const numericValue = parseFloat(value);
+                if (!isNaN(numericValue)) {
+                    return `(data->>'${field}')::numeric ${operator} ${numericValue}`;
+                }
+
+                // Handle boolean values
+                if (value.toLowerCase() === 'true' || value.toLowerCase() === 'false') {
+                    return `(data->>'${field}')::boolean = ${value.toLowerCase()}`;
+                }
+
+                // For string values (handle quotes)
+                return `data->>'${field}' ${operator} ${value}`;
             });
 
             return andConditions.join(' AND ');
