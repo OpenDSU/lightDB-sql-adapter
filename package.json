@@ -4,18 +4,21 @@
   "description": "Universal SQL Adapter for LightDB",
   "main": "index.js",
   "scripts": {
+    "postinstall": "node ./node_modules/octopus/scripts/setEnv --file=../../../env.json \"node ./node_modules/octopus/scripts/run\"",
     "test": "mocha tests/**/*-tests.js --timeout 10000",
     "test:adapter": "DEBUG=true mocha tests/pgsql-adapter-tests.js --timeout 10000"
   },
   "dependencies": {
-    "syndicate": "github:opendsu/syndicate",
-    "pg": "^8.11.3",
+    "is-wsl": "^3.1.0",
+    "mssql": "^10.0.1",
     "mysql2": "^3.6.1",
-    "mssql": "^10.0.1"
+    "octopus": "git+http://github.com/opendsu/octopus.git",
+    "pg": "^8.11.3",
+    "syndicate": "github:opendsu/syndicate"
   },
   "devDependencies": {
-    "mocha": "^10.2.0",
-    "assert": "^2.1.0"
+    "assert": "^2.1.0",
+    "mocha": "^10.2.0"
   },
   "repository": {
     "type": "git",
