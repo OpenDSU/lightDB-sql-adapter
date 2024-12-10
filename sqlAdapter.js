@@ -6,8 +6,8 @@ const ConnectionRegistry = require('./connectionRegistry');
 
 
 class SQLAdapter {
-    constructor(type) {
-        this.type = type;
+    constructor(config) {
+        this.config = config || ConnectionRegistry.DEFAULT_CONFIGS[this.config.type.toLowerCase()];
         this.READ_WRITE_KEY_TABLE = "KeyValueTable";
         this.debug = process.env.DEBUG === 'true';
 
@@ -16,8 +16,7 @@ class SQLAdapter {
             maximumNumberOfWorkers: 4,
             workerOptions: {
                 workerData: {
-                    type: this.type,
-                    config: ConnectionRegistry.DEFAULT_CONFIGS[this.type.toLowerCase()]
+                    config: this.config
                 }
             }
         });
@@ -59,8 +58,7 @@ class SQLAdapter {
                     taskName,
                     args: safeArgs,
                     workerData: {
-                        type: this.type,
-                        config: ConnectionRegistry.DEFAULT_CONFIGS[this.type.toLowerCase()]
+                        config: this.config
                     }
                 }, (err, result) => {
                     if (err) {
