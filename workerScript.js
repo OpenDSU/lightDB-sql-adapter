@@ -10,8 +10,11 @@ let strategy = null;
 if (!isMainThread) {
     parentPort.postMessage("ready");
 
-    async function initializePool(config) {
-        const type = config.type;
+    async function initializePool(config, type) {
+        if (!config){
+            config = ConnectionRegistry.DEFAULT_CONFIGS[type.toLowerCase()]
+        }
+
         if (!pool) {
             console.log('DEBUG: Initializing pool with type:', type);
             pool = await ConnectionRegistry.createConnection(type, config);

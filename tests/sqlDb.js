@@ -1,10 +1,9 @@
-const SQLAdapter = require("../sqlAdapter");
-const getTestDb = require("./../opendsu-sdk/modules/loki-enclave-facade/tests/test-util").getTestDb;
+const getTestDb = require("../../loki-enclave-facade/tests/test-util").getTestDb;
 
 function getSQLDB() {
-    const ConnectionRegistry = require('./../connectionRegistry');
+    const SQLAdapter = require("../sqlAdapter");
 
-    return new SQLAdapter(ConnectionRegistry.POSTGRESQL);
+    return new SQLAdapter(undefined,"postgresql");
 }
 
 const adapter = getSQLDB();

@@ -2,9 +2,7 @@
 const syndicate = require('syndicate');
 
 class SQLAdapter {
-    constructor(config) {
-        const ConnectionRegistry = require('./connectionRegistry');
-        this.config = config || ConnectionRegistry.DEFAULT_CONFIGS[this.config.type.toLowerCase()];
+    constructor(config, type) {
         this.READ_WRITE_KEY_TABLE = "KeyValueTable";
         this.debug = process.env.DEBUG === 'true';
 
@@ -13,7 +11,8 @@ class SQLAdapter {
             maximumNumberOfWorkers: 4,
             workerOptions: {
                 workerData: {
-                    config: this.config
+                    config,
+                    type
                 }
             }
         });
