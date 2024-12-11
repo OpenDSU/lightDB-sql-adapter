@@ -1,7 +1,5 @@
 // connectionRegistry.js
 const {Pool} = require('pg');
-const mysql = require('mysql2/promise');
-const sql = require('mssql');
 
 class ConnectionRegistry {
     static get POSTGRESQL() {
@@ -66,7 +64,6 @@ class ConnectionRegistry {
             throw new Error(`No configuration found for database type: ${type}`);
         }
 
-        let connection = null;
         try {
             switch (dbType) {
                 case 'postgresql':
@@ -80,26 +77,10 @@ class ConnectionRegistry {
                     await pool.query('SELECT 1');
                     return pool;
 
-                case 'mysql':
-                    connection = await mysql.createPool(config);
-                    // Test the connection
-                    await connection.query('SELECT 1');
-                    break;
-
-                case 'sqlserver':
-                    connection = await sql.connect(config);
-                    // Test the connection
-                    await connection.request().query('SELECT 1');
-                    break;
-
                 default:
                     throw new Error(`Unsupported database type: ${type}`);
             }
-            return connection;
         } catch (error) {
-            if (connection) {
-                await connection.end().catch(console.error);
-            }
             throw new Error(`Failed to connect to ${type}: ${error.message}`);
         }
     }
@@ -116,12 +97,6 @@ class ConnectionRegistry {
             if (connection) {
                 switch (type.toLowerCase()) {
                     case 'postgresql':
-                    case 'mysql':
-                        await connection.end();
-                        break;
-                    case 'sqlserver':
-                        await connection.close();
-                        break;
                 }
             }
         }

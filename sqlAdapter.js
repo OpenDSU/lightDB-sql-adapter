@@ -2,11 +2,11 @@
 const syndicate = require('syndicate');
 const {isMainThread, parentPort} = require('worker_threads');
 const {StrategyFactory} = require('./strategyFactory');
-const ConnectionRegistry = require('./connectionRegistry');
 
 
 class SQLAdapter {
     constructor(config) {
+        const ConnectionRegistry = require('./connectionRegistry');
         this.config = config || ConnectionRegistry.DEFAULT_CONFIGS[this.config.type.toLowerCase()];
         this.READ_WRITE_KEY_TABLE = "KeyValueTable";
         this.debug = process.env.DEBUG === 'true';

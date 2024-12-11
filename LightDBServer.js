@@ -12,7 +12,7 @@ process.on('SIGTERM', (signal) => {
 function LightDBServer(config, sqlConfig, callback) {
     let {lightDBStorage, lightDBPort, lightDBDynamicPort, host} = config;
     const apihubModule = require("apihub");
-    const LokiEnclaveFacade = require("../LokiEnclaveFacade/LokiEnclaveFacade");
+    const LokiEnclaveFacade = require("./opendsu-sdk/modules/loki-enclave-facade/LokiEnclaveFacade");
     const SQLAdapter = require("./sqlAdapter");
     const httpWrapper = apihubModule.getHttpWrapper();
     const Server = httpWrapper.Server;
