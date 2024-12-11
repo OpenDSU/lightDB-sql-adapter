@@ -1,8 +1,5 @@
 // sqlAdapter.js
 const syndicate = require('syndicate');
-const {isMainThread, parentPort} = require('worker_threads');
-const {StrategyFactory} = require('./strategyFactory');
-
 
 class SQLAdapter {
     constructor(config) {
