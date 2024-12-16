@@ -3,6 +3,7 @@ const worker_threads = "worker_threads";
 const {parentPort, isMainThread} = require(worker_threads);
 const {StrategyFactory} = require("./strategyFactory");
 const ConnectionRegistry = require('./connectionRegistry');
+const constants = require("./constants");
 
 let pool = null;
 let strategy = null;
@@ -10,7 +11,11 @@ let strategy = null;
 if (!isMainThread) {
     parentPort.postMessage("ready");
 
-    async function initializePool(config, type) {
+    async function initializePool(config) {
+        let type = constants.TYPES.POSTGRESQL;
+        if (config && config.type) {
+            type = config.type;
+        }
         if (!config){
             config = ConnectionRegistry.DEFAULT_CONFIGS[type.toLowerCase()]
         }

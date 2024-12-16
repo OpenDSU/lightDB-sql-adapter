@@ -184,10 +184,38 @@ class PostgreSQLStrategy extends BaseStrategy {
     }
 
     async filter(connection, tableName, conditions = [], sort = 'asc', max = null) {
+        // Handle string condition by converting to array
+        if (typeof conditions === "string") {
+            conditions = [conditions];
+        }
+
+        // Handle when conditions is a function (callback)
+        if (typeof conditions === "function") {
+            max = Infinity;
+            sort = "asc";
+            conditions = [];
+        }
+
+        // Handle when sort is a function (callback)
+        if (typeof sort === "function") {
+            max = Infinity;
+            sort = "asc";
+        }
+
+        // Handle when max is a function (callback)
+        if (typeof max === "function") {
+            max = Infinity;
+        }
+
+        // Set max to Infinity if not provided
+        if (!max) {
+            max = Infinity;
+        }
+
         let query = `
-            SELECT pk, data, __timestamp 
-            FROM "${tableName}"
-        `;
+        SELECT pk, data, __timestamp 
+        FROM "${tableName}"
+    `;
 
         if (conditions && conditions.length > 0) {
             const whereClause = this._convertToSQLQuery(conditions);
@@ -198,7 +226,7 @@ class PostgreSQLStrategy extends BaseStrategy {
 
         query += ` ORDER BY __timestamp ${sort.toUpperCase()}`;
 
-        if (max) {
+        if (max && max !== Infinity) {
             query += ` LIMIT ${max}`;
         }
 
@@ -310,22 +338,36 @@ class PostgreSQLStrategy extends BaseStrategy {
                     throw new Error(`Invalid condition structure: ${condition}`);
                 }
 
-                const [field, operator, value] = parts;
+                let [field, operator, value] = parts;
+
+                // Normalize operator
+                operator = operator.replace('==', '=');
 
                 // Handle IS NULL and IS NOT NULL
                 if (value.toLowerCase() === 'null') {
                     return `data->>'${field}' IS NULL`;
                 }
 
-                // Handle LIKE/ILIKE operator
-                if (operator.toLowerCase() === 'like') {
-                    return `data->>'${field}' ILIKE ${value}`;
+            // Handle LIKE/ILIKE operator
+            if (operator.toLowerCase() === 'like') {
+                // Handle a regex pattern for word boundary
+                if (value.includes('\\b')) {
+                    // Convert \btest\w* to proper PostgreSQL regex
+                    value = value.replace(/\\b/g, '\\m');  // \m for word boundary in PostgreSQL
+                    value = value.replace(/\\w\*/g, '[a-zA-Z0-9_]*');  // \w* to PostgreSQL pattern
+                    // Escape single quotes and wrap in quotes
+                    value = `'${value.replace(/'/g, "''")}'`;
+                } else {
+                    value = `'${value.replace(/'/g, "''")}'`;
                 }
+                return `data->>'${field}' ~ ${value}`;  // Using ~ for regex match
+            }
 
                 // Handle numeric comparisons
                 const numericValue = parseFloat(value);
                 if (!isNaN(numericValue)) {
-                    return `(data->>'${field}')::numeric ${operator} ${numericValue}`;
+                    // Cast both sides to numeric for comparison
+                    return `(data->>'${field}')::numeric ${operator} ${numericValue}::numeric`;
                 }
 
                 // Handle boolean values
@@ -334,6 +376,10 @@ class PostgreSQLStrategy extends BaseStrategy {
                 }
 
                 // For string values (handle quotes)
+                // If value is not wrapped in quotes, add them
+                if (!value.startsWith("'") && !value.startsWith('"')) {
+                    value = `'${value}'`;
+                }
                 return `data->>'${field}' ${operator} ${value}`;
             });
 

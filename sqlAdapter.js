@@ -2,23 +2,29 @@
 const syndicate = require('syndicate');
 
 class SQLAdapter {
-    constructor(config, type) {
+    READ_WRITE_KEY_TABLE;
+    debug;
+    workerPool;
+    config;
+
+    constructor(config) {
         this.READ_WRITE_KEY_TABLE = "KeyValueTable";
-        this.debug = process.env.DEBUG === 'true';
+        this.debug = process.env.DEBUG === 'false';
+        this.config = config;
 
         this.workerPool = syndicate.createWorkerPool({
             bootScript: require("path").join(__dirname, "./workerScript.js"),
             maximumNumberOfWorkers: 4,
             workerOptions: {
                 workerData: {
-                    config,
-                    type
+                    config
                 }
             }
         });
+        console.log("creating new sqlAdapter instance.");
     }
 
-    async close() {
+    close = async () => {
         try {
             if (this.workerPool && typeof this.workerPool.drain === 'function') {
                 await this.workerPool.drain();
@@ -35,7 +41,7 @@ class SQLAdapter {
         }
     }
 
-    _executeTask(taskName, args) {
+    _executeTask = (taskName, args) => {
         return new Promise((resolve, reject) => {
             try {
                 // Sanitize args to ensure they're serializable
@@ -54,7 +60,7 @@ class SQLAdapter {
                     taskName,
                     args: safeArgs,
                     workerData: {
-                        config: this.config
+                        config: this.config,
                     }
                 }, (err, result) => {
                     if (err) {
@@ -79,8 +85,7 @@ class SQLAdapter {
         });
     }
 
-    // Generic method to wrap callback-style operations
-    _executeWithCallback(taskName, args, callback) {
+    _executeWithCallback = (taskName, args, callback) => {
         this._executeTask(taskName, args)
             .then(result => callback(null, result))
             .catch(error => {
@@ -93,85 +98,103 @@ class SQLAdapter {
     }
 
     // Database operations with callbacks
-    refresh(callback) {
+    refresh = (forDID, callback) => {
         this._executeWithCallback('refresh', [], callback);
     }
 
-    saveDatabase(callback) {
+    saveDatabase = (forDID, callback) => {
         this._executeWithCallback('saveDatabase', [], callback);
     }
 
-    getCollections(callback) {
+    getCollections = (forDID, callback) => {
         this._executeWithCallback('getCollections', [], callback);
     }
 
-    createCollection(tableName, indicesList, callback) {
+    createCollection = (forDID, tableName, indicesList, callback) => {
         this._executeWithCallback('createCollection', [tableName, indicesList], callback);
     }
 
-    removeCollection(tableName, callback) {
+    removeCollection = (forDID, tableName, callback) => {
         this._executeWithCallback('removeCollection', [tableName], callback);
     }
 
-    addIndex(tableName, property, callback) {
+    addIndex = (forDID, tableName, property, callback) => {
         this._executeWithCallback('addIndex', [tableName, property], callback);
     }
 
-    getOneRecord(tableName, callback) {
+    getOneRecord = (forDID, tableName, callback) => {
         this._executeWithCallback('getOneRecord', [tableName], callback);
     }
 
-    getAllRecords(tableName, callback) {
+    getAllRecords = (forDID, tableName, callback) => {
         this._executeWithCallback('getAllRecords', [tableName], callback);
     }
 
-    insertRecord(tableName, pk, record, callback) {
+    insertRecord = (forDID, tableName, pk, record, callback) => {
         this._executeWithCallback('insertRecord', [tableName, pk, record], callback);
     }
 
-    updateRecord(tableName, pk, record, callback) {
+    updateRecord = (forDID, tableName, pk, record, callback) => {
         this._executeWithCallback('updateRecord', [tableName, pk, record], callback);
     }
 
-    deleteRecord(tableName, pk, callback) {
+    deleteRecord = (forDID, tableName, pk, callback) => {
         this._executeWithCallback('deleteRecord', [tableName, pk], callback);
     }
 
-    getRecord(tableName, pk, callback) {
+    getRecord = (forDID, tableName, pk, callback) => {
         this._executeWithCallback('getRecord', [tableName, pk], callback);
     }
 
-    filter(tableName, filterConditions = [], sort = 'asc', max = null, callback) {
+    filter = (forDID, tableName, filterConditions = [], sort = 'asc', max = null, callback) => {
+
+        // Handle when filterConditions is the callback
+        if (typeof filterConditions === 'function') {
+            callback = filterConditions;
+            filterConditions = [];
+            sort = 'asc';
+            max = null;
+        }
+        // Handle when sort is the callback
+        else if (typeof sort === 'function') {
+            callback = sort;
+            sort = 'asc';
+            max = null;
+        }
+        // Handle when max is the callback
+        else if (typeof max === 'function') {
+            callback = max;
+            max = null;
+        }
         this._executeWithCallback('filter', [tableName, filterConditions, sort, max], callback);
     }
 
-    addInQueue(queueName, object, ensureUniqueness = false, callback) {
+    addInQueue = (forDID, queueName, object, ensureUniqueness = false, callback) => {
         this._executeWithCallback('addInQueue', [queueName, object, ensureUniqueness], callback);
     }
 
-    queueSize(queueName, callback) {
+    queueSize = (forDID, queueName, callback) => {
         this._executeWithCallback('queueSize', [queueName], callback);
     }
 
-    listQueue(queueName, sortAfterInsertTime = 'asc', onlyFirstN = null, callback) {
+    listQueue = (forDID, queueName, sortAfterInsertTime = 'asc', onlyFirstN = null, callback) => {
         this._executeWithCallback('listQueue', [queueName, sortAfterInsertTime, onlyFirstN], callback);
     }
 
-    getObjectFromQueue(queueName, hash, callback) {
+    getObjectFromQueue = (forDID, queueName, hash, callback) => {
         this._executeWithCallback('getObjectFromQueue', [queueName, hash], callback);
     }
 
-    deleteObjectFromQueue(queueName, hash, callback) {
+    deleteObjectFromQueue = (forDID, queueName, hash, callback) => {
         this._executeWithCallback('deleteObjectFromQueue', [queueName, hash], callback);
     }
 
-    // Special handling for writeKey and readKey due to value processing
-    writeKey(key, value, callback) {
+    writeKey = (forDID, key, value, callback) => {
         const valueObject = this._processValueForStorage(value);
         this._executeWithCallback('writeKey', [key, valueObject], callback);
     }
 
-    readKey(key, callback) {
+    readKey = (forDID, key, callback) => {
         this._executeWithCallback('readKey', [key], (error, result) => {
             if (error) return callback(error);
             if (!result) return callback(null, null);
@@ -180,25 +203,25 @@ class SQLAdapter {
     }
 
     // Async versions of operations
-    async refreshAsync() {
+    refreshAsync = async () => {
         return this._executeTask('refresh', []);
     }
 
-    async removeCollectionAsync(tableName) {
+    removeCollectionAsync = async (forDID, tableName) => {
         return this._executeTask('removeCollectionAsync', [tableName]);
     }
 
-    async count(tableName) {
-        return this._executeTask('count', [tableName]);
+    count = async (forDID, tableName, callback) => {
+        return this._executeWithCallback('count', [tableName], callback);
     }
 
-    async saveDatabaseAsync() {
+    saveDatabaseAsync = async (forDID) => {
         await this._executeTask('saveDatabase', []);
         return {message: "Database saved"};
     }
 
     // Helper methods
-    _processValueForStorage(value) {
+    _processValueForStorage = (value) => {
         if (Buffer.isBuffer(value)) {
             return {
                 type: "buffer",

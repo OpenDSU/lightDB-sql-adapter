@@ -1,9 +1,9 @@
 const getTestDb = require("../../loki-enclave-facade/tests/test-util").getTestDb;
 
-function getSQLDB() {
+function getSQLDB(config) {
     const SQLAdapter = require("../sqlAdapter");
 
-    return new SQLAdapter(undefined,"postgresql");
+    return new SQLAdapter(config);
 }
 
 const adapter = getSQLDB();
