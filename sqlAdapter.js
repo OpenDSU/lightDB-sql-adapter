@@ -10,7 +10,8 @@ class SQLAdapter {
 
     constructor(config) {
         this.READ_WRITE_KEY_TABLE = "KeyValueTable";
-        this.debug = process.env.DEBUG === 'false';
+        this.debug = process.env.DEBUG === 'true';
+
         this.config = config;
 
         this.workerPool = syndicate.createWorkerPool({
@@ -96,6 +97,10 @@ class SQLAdapter {
                 }
                 callback(error);
             });
+    }
+
+    createDatabase = (forDID, callback) => {
+        this._executeWithCallback('createDatabase', [], callback);
     }
 
     // Database operations with callbacks

@@ -16,6 +16,7 @@ if (!isMainThread) {
         if (config && config.type) {
             type = config.type;
         }
+
         if (!config){
             config = ConnectionRegistry.DEFAULT_CONFIGS[type.toLowerCase()]
         }

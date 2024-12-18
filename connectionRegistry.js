@@ -24,7 +24,8 @@ class ConnectionRegistry {
                 database: 'postgres',
                 port: 5432,
                 max: 20,  // Max number of clients in the pool
-                idleTimeoutMillis: 30000  // Close idle clients after 30 seconds
+                idleTimeoutMillis: 30000,  // Close idle clients after 30 seconds
+                ssl: false
             },
             mysql: {
                 host: 'localhost',
@@ -64,6 +65,14 @@ class ConnectionRegistry {
             throw new Error(`No configuration found for database type: ${type}`);
         }
 
+        // Validate required configuration fields
+        if (!config.user || typeof config.user !== 'string') {
+            throw new Error('Database user must be a string');
+        }
+        if (!config.password || typeof config.password !== 'string') {
+            throw new Error('Database password must be a string');
+        }
+
         try {
             switch (dbType) {
                 case 'postgresql':
@@ -81,6 +90,14 @@ class ConnectionRegistry {
                     throw new Error(`Unsupported database type: ${type}`);
             }
         } catch (error) {
+            console.error('Connection error details:', {
+                type: dbType,
+                host: config.host,
+                port: config.port,
+                database: config.database,
+                user: config.user,
+                error: error.message
+            });
             throw new Error(`Failed to connect to ${type}: ${error.message}`);
         }
     }

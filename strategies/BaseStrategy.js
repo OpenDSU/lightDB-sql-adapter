@@ -16,6 +16,10 @@ class BaseStrategy {
         this.DIDS_PRIVATE_KEYS = "dids_private";
     }
 
+    async createDatabase(connection) {
+        throw new Error('Not implemented');
+    }
+
     // Database schema operations
     async createCollection(connection, tableName, indicesList) {
         throw new Error('Not implemented');

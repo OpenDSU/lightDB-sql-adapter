@@ -9,6 +9,41 @@ class PostgreSQLStrategy extends BaseStrategy {
         this.READ_WRITE_KEY_TABLE = "KeyValueTable";
     }
 
+    async cleanupDatabase(connection) {
+        console.log('DEBUG: Starting database cleanup');
+
+        // Get all tables
+        const query = `
+        SELECT table_name 
+        FROM information_schema.tables 
+        WHERE table_schema = 'public' 
+        AND table_type = 'BASE TABLE'
+        AND table_name NOT LIKE 'pg_%'
+    `;
+
+        const result = await this.executeQuery(connection, query);
+        const tables = result.rows.map(row => row.table_name);
+
+        // Drop each table
+        for (const table of tables) {
+            console.log('DEBUG: Dropping table:', table);
+            await this.executeQuery(connection, `DROP TABLE IF EXISTS "${table}" CASCADE`);
+        }
+
+        console.log('DEBUG: Database cleanup completed');
+    }
+
+    async createDatabase(connection) {
+        try {
+            // Clean up any existing tables first
+            await this.cleanupDatabase(connection);
+            return {success: true, message: "Database reset and ready"};
+        } catch (error) {
+            console.error('Error in createDatabase:', error);
+            throw error;
+        }
+    }
+
     // Database schema operations
     async ensureKeyValueTable(connection) {
         const query = `
@@ -215,7 +250,7 @@ class PostgreSQLStrategy extends BaseStrategy {
         let query = `
         SELECT pk, data, __timestamp 
         FROM "${tableName}"
-    `;
+        `;
 
         if (conditions && conditions.length > 0) {
             const whereClause = this._convertToSQLQuery(conditions);
@@ -348,20 +383,20 @@ class PostgreSQLStrategy extends BaseStrategy {
                     return `data->>'${field}' IS NULL`;
                 }
 
-            // Handle LIKE/ILIKE operator
-            if (operator.toLowerCase() === 'like') {
-                // Handle a regex pattern for word boundary
-                if (value.includes('\\b')) {
-                    // Convert \btest\w* to proper PostgreSQL regex
-                    value = value.replace(/\\b/g, '\\m');  // \m for word boundary in PostgreSQL
-                    value = value.replace(/\\w\*/g, '[a-zA-Z0-9_]*');  // \w* to PostgreSQL pattern
-                    // Escape single quotes and wrap in quotes
-                    value = `'${value.replace(/'/g, "''")}'`;
-                } else {
-                    value = `'${value.replace(/'/g, "''")}'`;
+                // Handle LIKE/ILIKE operator
+                if (operator.toLowerCase() === 'like') {
+                    // Handle a regex pattern for word boundary
+                    if (value.includes('\\b')) {
+                        // Convert \btest\w* to proper PostgreSQL regex
+                        value = value.replace(/\\b/g, '\\m');  // \m for word boundary in PostgreSQL
+                        value = value.replace(/\\w\*/g, '[a-zA-Z0-9_]*');  // \w* to PostgreSQL pattern
+                        // Escape single quotes and wrap in quotes
+                        value = `'${value.replace(/'/g, "''")}'`;
+                    } else {
+                        value = `'${value.replace(/'/g, "''")}'`;
+                    }
+                    return `data->>'${field}' ~ ${value}`;  // Using ~ for regex match
                 }
-                return `data->>'${field}' ~ ${value}`;  // Using ~ for regex match
-            }
 
                 // Handle numeric comparisons
                 const numericValue = parseFloat(value);
