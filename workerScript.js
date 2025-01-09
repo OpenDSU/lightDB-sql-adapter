@@ -48,7 +48,9 @@ if (!isMainThread) {
             }
 
             result = await strategy[taskName](pool, ...args);
-            result = JSON.parse(JSON.stringify(result));
+            if (result !== undefined) {
+                result = JSON.parse(JSON.stringify(result));
+            }
 
             parentPort.postMessage({
                 success: true,

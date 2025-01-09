@@ -35,9 +35,7 @@ class PostgreSQLStrategy extends BaseStrategy {
 
     async createDatabase(connection) {
         try {
-            // Clean up any existing tables first
-            await this.cleanupDatabase(connection);
-            return {success: true, message: "Database reset and ready"};
+            return {success: true, message: "Database ready"};
         } catch (error) {
             console.error('Error in createDatabase:', error);
             throw error;
@@ -96,6 +94,7 @@ class PostgreSQLStrategy extends BaseStrategy {
         AND table_type = 'BASE TABLE'
         AND table_name != 'KeyValueTable'
     `;
+        console.log("****************")
         const result = await this.executeQuery(connection, query);
         return result.rows.map(row => row.name);
     }

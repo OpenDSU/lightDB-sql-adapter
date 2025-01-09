@@ -1,250 +1,237 @@
-// sqlAdapter.js
-const syndicate = require('syndicate');
-const path = require('path');
+function SQLAdapter(config) {
+    const logger = $$.getLogger("SQLAdapter", "SQLAdapter.js");
+    const SQLDecorator = require("./sqlDecorator");
+    const openDSU = require("opendsu");
+    const aclAPI = require("acl-magic");
+    const utils = openDSU.loadAPI("utils");
+    logger.info("Creating SQLAdapter instance");
+    const EnclaveMixin = openDSU.loadAPI("enclave").EnclaveMixin;
+    EnclaveMixin(this);
 
-class SQLAdapter {
-    READ_WRITE_KEY_TABLE;
-    debug;
-    workerPool;
-    config;
+    let refreshInProgress = false;
 
-    constructor(config) {
-        this.READ_WRITE_KEY_TABLE = "KeyValueTable";
-        this.debug = process.env.DEBUG === 'true';
+    this.close = async () => {
+        return await this.storageDB.close();
+    }
 
-        this.config = config;
+    this.refreshInProgress = (forDID) => {
+        return refreshInProgress;
+    }
 
-        this.workerPool = syndicate.createWorkerPool({
-            bootScript: path.join(__dirname, "./workerScript.js"),
-            maximumNumberOfWorkers: 4,
-            workerOptions: {
-                workerData: {
-                    config
-                }
-            }
+    this.refresh = (forDID, callback) => {
+        refreshInProgress = true;
+        this.storageDB.refresh((err) => {
+            refreshInProgress = false;
+            callback(err);
         });
-        console.log("creating new sqlAdapter instance.");
     }
 
-    close = async () => {
-        try {
-            if (this.workerPool && typeof this.workerPool.drain === 'function') {
-                await this.workerPool.drain();
-            }
-            if (this.workerPool && typeof this.workerPool.clear === 'function') {
-                await this.workerPool.clear();
-            }
-            if (this.workerPool && typeof this.workerPool.terminate === 'function') {
-                await this.workerPool.terminate();
-            }
-        } catch (error) {
-            console.error('Error closing worker pool:', error);
-            throw error;
-        }
+    this.saveDatabase = (forDID, callback) => {
+        this.storageDB.saveDatabase(callback);
     }
 
-    _executeTask = (taskName, args) => {
+    this.createDatabase = (forDID, callback) => {
+        this.storageDB.createDatabase(callback);
+    }
+
+    this.cleanupDatabase = (forDID, callback) => {
+        this.storageDB.cleanupDatabase(callback);
+    }
+
+    this.removeCollection = (forDID, tableName, callback) => {
+        this.storageDB.removeCollection(tableName, callback);
+    }
+
+    this.removeCollectionAsync = (forDID, tableName) => {
         return new Promise((resolve, reject) => {
-            try {
-                // Sanitize args to ensure they're serializable
-                const safeArgs = args.map(arg => {
-                    if (arg === null || arg === undefined) return arg;
-                    if (typeof arg === 'function') return null;
-                    if (Buffer.isBuffer(arg)) return arg.toString('base64');
-                    if (typeof arg === 'object') {
-                        return JSON.parse(JSON.stringify(arg));
-                    }
-                    return arg;
-                });
-
-                // Include workerData in the message
-                this.workerPool.addTask({
-                    taskName,
-                    args: safeArgs,
-                    workerData: {
-                        config: this.config,
-                    }
-                }, (err, result) => {
-                    if (err) {
-                        const error = new Error(err.message || 'Unknown error');
-                        if (err.code) error.code = err.code;
-                        if (err.type) error.type = err.type;
-                        reject(error);
-                    } else {
-                        if (!result.success) {
-                            const error = new Error(result.error?.message || 'Unknown error');
-                            if (result.error?.code) error.code = result.error.code;
-                            if (result.error?.type) error.type = result.error.type;
-                            reject(error);
-                        } else {
-                            resolve(result.result);
-                        }
-                    }
-                });
-            } catch (err) {
-                reject(new Error('Task execution failed: ' + (err.message || 'Unknown error')));
-            }
+            this.storageDB.removeCollection(tableName, (err) => {
+                if (err) {
+                    return reject(err);
+                }
+                resolve();
+            });
         });
     }
 
-    _executeWithCallback = (taskName, args, callback) => {
-        this._executeTask(taskName, args)
-            .then(result => callback(null, result))
-            .catch(error => {
-                // Ensure error is properly formatted
-                if (!(error instanceof Error)) {
-                    error = new Error(error.message || 'Unknown error');
+    this.refreshAsync = () => {
+        let self = this;
+        return new Promise((resolve, reject) => {
+            self.storageDB.refresh((err) => {
+                if (err) {
+                    return reject(err);
                 }
-                callback(error);
+                resolve();
             });
+        });
     }
 
-    createDatabase = (forDID, callback) => {
-        this._executeWithCallback('createDatabase', [], callback);
+    const WRITE_ACCESS = "write";
+    const READ_ACCESS = "read";
+    const WILDCARD = "*";
+    const persistence = aclAPI.createEnclavePersistence(this);
+
+    this.grantWriteAccess = (forDID, callback) => {
+        persistence.grant(WRITE_ACCESS, WILDCARD, forDID, (err) => {
+            if (err) {
+                return callback(err);
+            }
+
+            this.grantReadAccess(forDID, callback);
+        });
     }
 
-    // Database operations with callbacks
-    refresh = (forDID, callback) => {
-        this._executeWithCallback('refresh', [], callback);
+    this.hasWriteAccess = (forDID, callback) => {
+        persistence.loadResourceDirectGrants(WRITE_ACCESS, forDID, (err, usersWithAccess) => {
+            if (err) {
+                return callback(err);
+            }
+
+            callback(undefined, usersWithAccess.indexOf(WILDCARD) !== -1);
+        });
     }
 
-    saveDatabase = (forDID, callback) => {
-        this._executeWithCallback('saveDatabase', [], callback);
+    this.revokeWriteAccess = (forDID, callback) => {
+        persistence.ungrant(WRITE_ACCESS, WILDCARD, forDID, callback);
     }
 
-    getCollections = (forDID, callback) => {
-        this._executeWithCallback('getCollections', [], callback);
+    this.grantReadAccess = (forDID, callback) => {
+        persistence.grant(READ_ACCESS, WILDCARD, forDID, callback);
     }
 
-    createCollection = (forDID, tableName, indicesList, callback) => {
-        this._executeWithCallback('createCollection', [tableName, indicesList], callback);
+    this.hasReadAccess = (forDID, callback) => {
+        persistence.loadResourceDirectGrants(READ_ACCESS, forDID, (err, usersWithAccess) => {
+            if (err) {
+                return callback(err);
+            }
+
+            callback(undefined, usersWithAccess.indexOf(WILDCARD) !== -1);
+        });
     }
 
-    removeCollection = (forDID, tableName, callback) => {
-        this._executeWithCallback('removeCollection', [tableName], callback);
+    this.revokeReadAccess = (forDID, callback) => {
+        persistence.ungrant(READ_ACCESS, WILDCARD, forDID, err => {
+            if (err) {
+                return callback(err);
+            }
+
+            this.revokeWriteAccess(forDID, callback);
+        });
     }
 
-    addIndex = (forDID, tableName, property, callback) => {
-        this._executeWithCallback('addIndex', [tableName, property], callback);
+    this.getOneRecord = (forDID, tableName, callback) => {
+        this.storageDB.getOneRecord(tableName, callback);
     }
 
-    getOneRecord = (forDID, tableName, callback) => {
-        this._executeWithCallback('getOneRecord', [tableName], callback);
+    this.count = (forDID, tableName, callback) => {
+        this.storageDB.count(tableName, callback);
     }
 
-    getAllRecords = (forDID, tableName, callback) => {
-        this._executeWithCallback('getAllRecords', [tableName], callback);
+    this.addInQueue = (forDID, queueName, encryptedObject, ensureUniqueness, callback) => {
+        this.storageDB.addInQueue(queueName, encryptedObject, ensureUniqueness, callback);
     }
 
-    insertRecord = (forDID, tableName, pk, record, callback) => {
-        this._executeWithCallback('insertRecord', [tableName, pk, record], callback);
+    this.queueSize = (forDID, queueName, callback) => {
+        this.count(queueName, callback);
     }
 
-    updateRecord = (forDID, tableName, pk, record, callback) => {
-        this._executeWithCallback('updateRecord', [tableName, pk, record], callback);
+    this.listQueue = (forDID, queueName, sortAfterInsertTime, onlyFirstN, callback) => {
+        this.storageDB.listQueue(queueName, sortAfterInsertTime, onlyFirstN, callback);
     }
 
-    deleteRecord = (forDID, tableName, pk, callback) => {
-        this._executeWithCallback('deleteRecord', [tableName, pk], callback);
+    this.getObjectFromQueue = (forDID, queueName, hash, callback) => {
+        return this.getRecord(forDID, queueName, hash, callback)
     }
 
-    getRecord = (forDID, tableName, pk, callback) => {
-        this._executeWithCallback('getRecord', [tableName, pk], callback);
+    this.deleteObjectFromQueue = (forDID, queueName, hash, callback) => {
+        return this.deleteRecord(forDID, queueName, hash, callback)
     }
 
-    filter = (forDID, tableName, filterConditions = [], sort = 'asc', max = null, callback) => {
+    this.getCollections = (forDID, callback) => {
+        this.storageDB.getCollections(callback);
+    }
 
-        // Handle when filterConditions is the callback
-        if (typeof filterConditions === 'function') {
+    this.createCollection = (forDID, tableName, indicesList, callback) => {
+        if (typeof indicesList === "function") {
+            callback = indicesList;
+            indicesList = undefined;
+        }
+        this.storageDB.createCollection(tableName, indicesList, callback);
+    }
+
+    this.getAllRecords = (forDID, tableName, callback) => {
+        this.storageDB.getAllRecords(tableName, callback);
+    }
+
+    this.insertRecord = (forDID, tableName, pk, record, callback) => {
+        this.storageDB.insertRecord(tableName, pk, record, callback);
+    }
+
+    this.updateRecord = (forDID, tableName, pk, record, callback) => {
+        this.storageDB.updateRecord(tableName, pk, record, callback);
+    }
+
+    this.deleteRecord = (forDID, tableName, pk, callback) => {
+        this.storageDB.deleteRecord(tableName, pk, callback);
+    }
+
+    this.getRecord = (forDID, tableName, pk, callback) => {
+        this.storageDB.getRecord(tableName, pk, callback);
+    }
+
+    this.filter = (forDID, tableName, filterConditions, sort = 'asc', max = null, callback) => {
+        if (typeof filterConditions === "function") {
             callback = filterConditions;
             filterConditions = [];
             sort = 'asc';
             max = null;
-        }
-        // Handle when sort is the callback
-        else if (typeof sort === 'function') {
+        } else if (typeof sort === "function") {
             callback = sort;
             sort = 'asc';
             max = null;
-        }
-        // Handle when max is the callback
-        else if (typeof max === 'function') {
+        } else if (typeof max === "function") {
             callback = max;
             max = null;
         }
-        this._executeWithCallback('filter', [tableName, filterConditions, sort, max], callback);
+        this.storageDB.filter(tableName, filterConditions, sort, max, callback);
     }
 
-    addInQueue = (forDID, queueName, object, ensureUniqueness = false, callback) => {
-        this._executeWithCallback('addInQueue', [queueName, object, ensureUniqueness], callback);
+    this.writeKey = (forDID, key, value, callback) => {
+        this.storageDB.writeKey(key, value, callback);
     }
 
-    queueSize = (forDID, queueName, callback) => {
-        this._executeWithCallback('queueSize', [queueName], callback);
+    this.readKey = (forDID, key, callback) => {
+        this.storageDB.readKey(key, callback);
     }
 
-    listQueue = (forDID, queueName, sortAfterInsertTime = 'asc', onlyFirstN = null, callback) => {
-        this._executeWithCallback('listQueue', [queueName, sortAfterInsertTime, onlyFirstN], callback);
+    this.allowedInReadOnlyMode = function (functionName) {
+        let readOnlyFunctions = ["getCollections",
+            "listQueue",
+            "queueSize",
+            "count",
+            "hasReadAccess",
+            "getPrivateInfoForDID",
+            "getCapableOfSigningKeySSI",
+            "getPathKeyMapping",
+            "getDID",
+            "getPrivateKeyForSlot",
+            "getIndexedFields",
+            "getRecord",
+            "getAllTableNames",
+            "filter",
+            "readKey",
+            "getAllRecords",
+            "getReadForKeySSI",
+            "verifyForDID",
+            "encryptMessage",
+            "decryptMessage"];
+
+        return readOnlyFunctions.indexOf(functionName) !== -1;
     }
 
-    getObjectFromQueue = (forDID, queueName, hash, callback) => {
-        this._executeWithCallback('getObjectFromQueue', [queueName, hash], callback);
-    }
+    utils.bindAutoPendingFunctions(this, ["on", "off", "dispatchEvent", "beginBatch", "isInitialised", "getEnclaveType", "getDID", "getUniqueIdAsync"]);
 
-    deleteObjectFromQueue = (forDID, queueName, hash, callback) => {
-        this._executeWithCallback('deleteObjectFromQueue', [queueName, hash], callback);
-    }
-
-    writeKey = (forDID, key, value, callback) => {
-        const valueObject = this._processValueForStorage(value);
-        this._executeWithCallback('writeKey', [key, valueObject], callback);
-    }
-
-    readKey = (forDID, key, callback) => {
-        this._executeWithCallback('readKey', [key], (error, result) => {
-            if (error) return callback(error);
-            if (!result) return callback(null, null);
-            callback(null, typeof result === 'string' ? JSON.parse(result) : result);
-        });
-    }
-
-    // Async versions of operations
-    refreshAsync = async () => {
-        return this._executeTask('refresh', []);
-    }
-
-    removeCollectionAsync = async (forDID, tableName) => {
-        return this._executeTask('removeCollectionAsync', [tableName]);
-    }
-
-    count = async (forDID, tableName, callback) => {
-        return this._executeWithCallback('count', [tableName], callback);
-    }
-
-    saveDatabaseAsync = async (forDID) => {
-        await this._executeTask('saveDatabase', []);
-        return {message: "Database saved"};
-    }
-
-    // Helper methods
-    _processValueForStorage = (value) => {
-        if (Buffer.isBuffer(value)) {
-            return {
-                type: "buffer",
-                value: value.toString()
-            };
-        }
-        if (value !== null && typeof value === "object") {
-            return {
-                type: "object",
-                value: JSON.stringify(value)
-            };
-        }
-        return {
-            type: typeof value,
-            value: value
-        };
-    }
+    this.storageDB = new SQLDecorator(config);
+    this.finishInitialisation();
 }
 
 module.exports = SQLAdapter;
