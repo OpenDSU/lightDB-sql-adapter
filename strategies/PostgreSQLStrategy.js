@@ -92,10 +92,10 @@ class PostgreSQLStrategy extends BaseStrategy {
         FROM information_schema.tables 
         WHERE table_schema = 'public' 
         AND table_type = 'BASE TABLE'
-        AND table_name != 'KeyValueTable'
+        AND table_name NOT IN ($1)
+        AND table_name NOT LIKE 'pg_%'
     `;
-        console.log("****************")
-        const result = await this.executeQuery(connection, query);
+        const result = await this.executeQuery(connection, query, [this.READ_WRITE_KEY_TABLE]);
         return result.rows.map(row => row.name);
     }
 

@@ -57,7 +57,10 @@ if (!isMainThread) {
                 result
             });
         } catch (err) {
-            console.error('DEBUG: Error executing task:', err);
+            // Only log error if it's not the expected "relation does not exist" error
+            if (!(err.code === '42P01' && err.message.includes('relation') && err.message.includes('does not exist'))) {
+                console.error('DEBUG: Error executing task:', err);
+            }
             error = {
                 message: err.message,
                 code: err.code,

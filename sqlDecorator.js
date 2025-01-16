@@ -1,6 +1,7 @@
 // sqlDecorator.js
 const syndicate = require('syndicate');
 const path = require('path');
+const workerScriptPath = require.resolve('./workerScript.js');
 
 class SQLDecorator {
     READ_WRITE_KEY_TABLE;
@@ -15,7 +16,7 @@ class SQLDecorator {
         this.config = config;
 
         this.workerPool = syndicate.createWorkerPool({
-            bootScript: path.join(__dirname, "./workerScript.js"),
+            bootScript: workerScriptPath,
             maximumNumberOfWorkers: 4,
             workerOptions: {
                 workerData: {
